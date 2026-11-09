@@ -16,6 +16,20 @@ function has_number (value) {
 }
 
 /**
+ * One name-resolution rule for both the pane and the data-wr-selector fan-out,
+ * so the two cannot disagree about which OBS input a markup element drives.
+ */
+export function source_name (inEl) {
+	if (!inEl)
+		return null;
+
+	return inEl.getAttribute('name')
+		|| inEl.getAttribute('data-wr-source')
+		|| inEl.id
+		|| null;
+}
+
+/**
  * One collapsible editor per opted-in input[data-wr-source] in index.html.
  *
  * The pane is seeded from OBS when it is opened: GetInputSettings carries only
@@ -27,7 +41,7 @@ export default class SourceText {
 	constructor (inInputEl, inRemote) {
 		this.input_el = inInputEl;
 		this.remote   = inRemote;
-		this.name     = inInputEl.getAttribute('name') || inInputEl.getAttribute('data-wr-source');
+		this.name     = source_name(inInputEl);
 		this.id       = inInputEl.id || h.get_slug(this.name);
 		this.slug     = h.get_slug(this.id);
 
@@ -38,24 +52,35 @@ export default class SourceText {
 		this.text_value = '';
 		this.text_timer = null;
 
+		// one text write at a time: the newest value waits in text_pending
+		this.text_inflight = false;
+		this.text_pending  = false;
+		this.text_dirty    = false;
+
 		this.el = h.NewElement('div', {
 			'id'       : 'source_' + this.slug + '_text',
 			'className': 'source-filter source-text'
 		});
 
-		this.title_el = h.NewElement('label', {
+		this.title_el = h.NewElement('div', {
 			'className': 'source-title'
 		});
 		this.el.appendChild(this.title_el);
 
-		this.title_span = h.NewElement('span', {
-			'title'    : this.name,
-			'innerHTML': this.name,
-			'events'   : {
+		// a real button: Enter and Space reach the pane with no key handler, and
+		// aria-expanded reports the open state to assistive tech
+		this.title_btn = h.NewElement('button', {
+			'type'          : 'button',
+			'className'     : 'text-source-toggle',
+			'title'         : this.name,
+			'innerHTML'     : this.name,
+			'aria-expanded' : 'false',
+			'aria-controls' : this.el.id + '_settings',
+			'events'        : {
 				'click': this.toggle_open.bind(this)
 			}
 		});
-		this.title_el.appendChild(this.title_span);
+		this.title_el.appendChild(this.title_btn);
 
 		this.btn_open = h.NewElement('span', {
 			'title'    : 'Toggle text settings pane',
@@ -68,12 +93,26 @@ export default class SourceText {
 		this.title_el.appendChild(this.btn_open);
 
 		this.settings_el = h.NewElement('div', {
+			'id'       : this.el.id + '_settings',
 			'className': 'filter-settings-section'
 		});
 		this.el.appendChild(this.settings_el);
 
+		// one honest line for a pane that could not be seeded, instead of a blank
+		// editable box over a source that may well have text
+		this.status_el = h.NewElement('p', {
+			'className': 'text-source-status',
+			'role'     : 'status',
+			'aria-live': 'polite',
+			'hidden'   : 'hidden'
+		});
+		this.settings_el.appendChild(this.status_el);
+
 		this.build_text_field();
 		this.build_style_fields();
+
+		// nothing is writable until a seed succeeds
+		this.set_controls_enabled(false);
 	}
 
 	get_element () {
@@ -309,6 +348,7 @@ export default class SourceText {
 	toggle_open () {
 		this.open = !this.open;
 		this.el.classList.toggle('open', this.open);
+		this.title_btn.setAttribute('aria-expanded', this.open ? 'true' : 'false');
 
 		if (this.open)
 			this.seed();
@@ -316,19 +356,69 @@ export default class SourceText {
 			this.flush_text();
 	}
 
+	// enable or dim every control at once; nothing is writable until seeded
+	set_controls_enabled (inEnabled) {
+		this.el.classList.toggle('disabled', !inEnabled);
+
+		[
+			this.textarea, this.face_el, this.size_el, this.color_el,
+			this.opacity_el, this.outline_el, this.align_el, this.valign_el
+		].forEach((el) => { el.disabled = !inEnabled; });
+
+		this.outline_size_el.disabled  = !inEnabled || !this.outline_el.checked;
+		this.outline_color_el.disabled = !inEnabled || !this.outline_el.checked;
+	}
+
+	set_status (inText) {
+		this.status_el.textContent = inText || '';
+
+		if (inText)
+			this.status_el.removeAttribute('hidden');
+		else
+			this.status_el.setAttribute('hidden', 'hidden');
+	}
+
+	// a pane OBS cannot serve for this name: say so, and refuse every write
+	mark_unseeded (inMessage) {
+		this.seeded     = false;
+		this.text_value = '';
+		this.settings   = {};
+		this.set_status(inMessage);
+		this.set_controls_enabled(false);
+	}
+
 	async seed () {
+		// a text write is in flight, so a read would return the value from before
+		// it and overwrite what the user is typing: keep local state instead
+		if (this.text_inflight)
+			return;
+
 		const kinds = await this.remote.get_input_kinds();
 
-		this.kind = (kinds && kinds.get(this.name)) || null;
+		if (!kinds) {
+			this.mark_unseeded('Could not read this source.');
+			return;
+		}
 
-		// FreeType and every non-text kind get the text box only. An input OBS
-		// does not know about lands here too, which leaves it behaving as it did
-		// before this pane existed rather than throwing.
+		if (!kinds.has(this.name)) {
+			this.mark_unseeded('Source not found in OBS.');
+			return;
+		}
+
+		this.kind = kinds.get(this.name) || null;
+
+		// FreeType and every other non-text kind get the text box only
 		const is_text = !!(this.kind && this.kind.indexOf('text_gdiplus') === 0);
 		this.el.classList.toggle('text-only', !is_text);
 
 		const user_res = await wrc.safeCall('GetInputSettings', {'inputName': this.name});
-		const user     = (user_res && user_res.inputSettings) || {};
+
+		if (!user_res || !user_res.inputSettings) {
+			this.mark_unseeded('Could not read this source.');
+			return;
+		}
+
+		const user = user_res.inputSettings;
 
 		let defaults = {};
 		if (is_text) {
@@ -344,7 +434,11 @@ export default class SourceText {
 		this.settings   = merged;
 		this.text_value = (typeof merged.text === 'string') ? merged.text : '';
 		this.textarea.value = this.text_value;
+		this.text_dirty = false;
 		this.seeded     = true;
+		this.set_status('');
+
+		this.set_controls_enabled(true);
 
 		if (!is_text)
 			return;
@@ -371,13 +465,17 @@ export default class SourceText {
 	}
 
 	set_outline_enabled (inEnabled) {
-		this.outline_size_el.disabled  = !inEnabled;
-		this.outline_color_el.disabled = !inEnabled;
+		const on = this.seeded && inEnabled;
+
+		this.outline_size_el.disabled  = !on;
+		this.outline_color_el.disabled = !on;
 	}
 
 	// --- text ----------------------------------------------------------------
 
 	on_text_input () {
+		this.text_dirty = true;
+
 		if (this.text_timer !== null)
 			window.clearTimeout(this.text_timer);
 
@@ -393,21 +491,39 @@ export default class SourceText {
 		if (!this.seeded)
 			return;
 
+		// one write at a time: the newest value waits and goes after this settles
+		if (this.text_inflight) {
+			this.text_pending = true;
+			return;
+		}
+
 		const value = this.textarea.value;
 
 		if (value === this.text_value)
 			return;
 
 		const previous = this.text_value;
-		this.text_value = value;
+
+		this.text_value    = value;
+		this.text_dirty    = false;
+		this.text_inflight = true;
 
 		const ok = await this.remote.set_text(this.name, value);
 
-		// OBS rejected the write: put the last known value back so the pane does
-		// not keep showing text the source never received
-		if (!ok) {
+		this.text_inflight = false;
+
+		// revert only if this box still holds the value OBS rejected; a newer
+		// value may already be in the box or queued behind this write
+		if (!ok && this.text_value === value) {
 			this.text_value = previous;
-			this.textarea.value = previous;
+
+			if (this.textarea.value === value)
+				this.textarea.value = previous;
+		}
+
+		if (this.text_pending) {
+			this.text_pending = false;
+			await this.flush_text();
 		}
 	}
 
@@ -417,17 +533,37 @@ export default class SourceText {
 		if (inSource !== this.name && inSource !== this.id)
 			return;
 
-		this.text_value = inText;
+		// the user's own text in a focused box outranks the selector value they
+		// never saw: leave the box and text_value alone and let it flush on blur
+		if (document.activeElement === this.textarea) {
+			this.text_dirty = true;
+			return;
+		}
 
-		if (this.textarea.value !== inText && document.activeElement !== this.textarea)
-			this.textarea.value = inText;
+		this.text_value = inText;
+		this.textarea.value = inText;
+		this.text_dirty = false;
+	}
+
+	// a source renamed in OBS no longer answers to this pane's name
+	on_source_renamed (inOldName) {
+		if (inOldName !== this.name && inOldName !== this.id)
+			return;
+
+		this.mark_unseeded('Source not found in OBS.');
 	}
 
 	// --- settings writes -----------------------------------------------------
 
 	async update_font (inKey, inValue) {
+		// no font means no successful seed, and merging onto FONT_FALLBACK here
+		// would send {face:'Arial', style:'Regular', size:64, flags:0} as the
+		// whole font, wiping the real one
+		if (!this.seeded || !this.settings.font)
+			return;
+
 		const previous = Object.assign({}, this.settings.font);
-		const font     = Object.assign({}, FONT_FALLBACK, this.settings.font);
+		const font     = Object.assign({}, this.settings.font);
 
 		font[inKey] = inValue;
 		this.settings.font = font;
@@ -436,29 +572,37 @@ export default class SourceText {
 		// face or flags, because overlay replaces a nested object whole
 		const ok = await this.remote.set_input_settings(this.name, {'font': font});
 
-		if (!ok) {
+		// revert only if this key still holds the value OBS rejected
+		if (!ok && this.settings.font[inKey] === inValue) {
 			this.settings.font = previous;
 			this.seed_font(previous);
 		}
 	}
 
 	update_color (inKey, inHex) {
-		// GDI+ ignores the alpha byte and uses opacity instead, so 0 is correct
-		return this.write_setting(inKey, h.rgbToObsColor(inHex), (previous) => {
-			const input = (inKey === 'color') ? this.color_el : this.outline_color_el;
+		const input    = (inKey === 'color') ? this.color_el : this.outline_color_el;
+		const fallback = (inKey === 'color') ? 0xFFFFFFFF : 0xFF000000;
+		const stored   = has_number(this.settings[inKey]) ? this.settings[inKey] : fallback;
 
-			input.value = h.obsColorToRgb(has_number(previous) ? previous : 0);
+		// GDI+ ignores the alpha byte, but OBS's own picker stores 0xFF there:
+		// keep it so the stored int round-trips instead of churning to 0x00
+		return this.write_setting(inKey, h.rgbToObsColor(inHex, stored), (previous) => {
+			input.value = h.obsColorToRgb(has_number(previous) ? previous : fallback);
 		});
 	}
 
 	async write_setting (inKey, inValue, inRestore) {
+		if (!this.seeded)
+			return false;
+
 		const previous = this.settings[inKey];
 
 		this.settings[inKey] = inValue;
 
 		const ok = await this.remote.set_input_settings(this.name, {[inKey]: inValue});
 
-		if (!ok) {
+		// revert only if this key still holds the value OBS rejected
+		if (!ok && this.settings[inKey] === inValue) {
 			this.settings[inKey] = previous;
 			if (inRestore)
 				inRestore(previous);

@@ -1,7 +1,7 @@
 import * as h from './helper.js';
 import SourceScene from './SourceScene.js';
 import SourceAudio from './SourceAudio.js';
-import SourceText from './SourceText.js';
+import SourceText, {source_name as source_name_of} from './SourceText.js';
 
 export default class WebRemote {
 	constructor () {
@@ -428,17 +428,29 @@ export default class WebRemote {
 	}
 
 	on_source_created (e) {
-		// a new input may be an audio-capable one
+		// a new input may be an audio-capable one, and it changes the kind map
+		this.input_kinds = null;
 		this.update_audio_list().catch(this.log_async_error);
 	}
 
 	on_source_destroyed (e) {
+		// a removed input leaves a stale kind behind, which decides whether an
+		// opted-in source gets the styling controls at all
+		this.input_kinds = null;
 		this.update_audio_list().catch(this.log_async_error);
 	}
 
 	on_source_renamed (e) {
-		// names changed, so the audio list labels need rebuilding
+		// names changed, so the audio list labels and the kind map are stale
+		this.input_kinds = null;
 		this.update_audio_list().catch(this.log_async_error);
+
+		// a pane bound to the old name can no longer write to that source: say
+		// so rather than letting it reject every write in silence
+		const old_name = e && e.oldInputName;
+
+		if (old_name)
+			this.text_panes.forEach((pane) => pane.on_source_renamed(old_name));
 	}
 
 	async transition () {
@@ -603,16 +615,16 @@ export default class WebRemote {
 
 				// assumption that length of values matches sources
 				for (var k = 0; k < sources.length; k++) {
-					// the list holds input ids; the OBS input name is the name attr
+					// the list holds element ids; the pane reads the same name rule
 					let source_el = document.getElementById(sources[k]);
-					let source_name = (source_el && source_el.getAttribute('name')) || sources[k];
+					let target    = source_name_of(source_el) || sources[k];
 
 					// set value in UI (if it exists)
 					if (source_el)
 						source_el.value = values[k];
 
 					// send value to OBS
-					this.set_text(source_name, values[k]);
+					this.set_text(target, values[k]);
 				}
 
 				e.preventDefault()

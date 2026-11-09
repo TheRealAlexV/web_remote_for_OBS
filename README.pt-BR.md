@@ -96,7 +96,7 @@ O painel abre com um clique e lê a fonte quando abre. Cada controle escreve a p
 - Contorno: `outline`, com `outline_size` e `outline_color`. Tamanho e cor ficam desativados enquanto o contorno está desligado.
 - Alinhamento: `align` e `valign`.
 
-Só fontes de texto GDI+ (`text_gdiplus_v2`, `text_gdiplus_v3`) recebem os controles de estilo. Qualquer outra entrada, inclusive fontes de texto FreeType, recebe só a caixa de texto. Um input cujo nome o OBS não conhece continua se comportando como o input simples que era.
+Só fontes de texto GDI+ (qualquer tipo `text_gdiplus*`) recebem os controles de estilo. Qualquer outra entrada, inclusive fontes de texto FreeType, recebe só a caixa de texto. Um input com opt-in é substituído por um painel, e quando o OBS não conhece o nome o painel mostra um estado de não encontrado e não grava nada.
 
 ### Escrever um valor em várias fontes
 O atributo `data-wr-selector` lista os `id` dos inputs acima, separados por `|`. O valor de cada opção é o texto para essas fontes, na mesma ordem, também separado por `|`. Ao mudar, o app atualiza o input correspondente e envia o texto ao OBS. Os ids do atributo são os ids dos inputs, não os nomes das fontes.
