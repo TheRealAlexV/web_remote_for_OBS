@@ -75,12 +75,14 @@ export default class SourceText {
 		this.el.appendChild(this.title_el);
 
 		// a real button: Enter and Space reach the pane with no key handler, and
-		// aria-expanded reports the open state to assistive tech
+		// aria-expanded reports the open state to assistive tech. The chevron is
+		// its child so a click on the arrow activates the button too, and
+		// text-source-row gives the same name-then-arrow flex layout as before.
 		this.title_btn = h.NewElement('button', {
 			'type'          : 'button',
-			'className'     : 'text-source-toggle',
+			'className'     : 'text-source-toggle text-source-row',
 			'title'         : this.name,
-			'innerHTML'     : this.name,
+			'innerHTML'     : '<span>' + this.name + '</span>',
 			'aria-expanded' : 'false',
 			'aria-controls' : this.el.id + '_settings',
 			'events'        : {
@@ -89,14 +91,14 @@ export default class SourceText {
 		});
 		this.title_el.appendChild(this.title_btn);
 
-		// decorative: the button above is the single control, so this must not
-		// take a click or a tab stop of its own
+		// decorative: the button is the single control, so the arrow takes no
+		// click or tab stop of its own
 		this.btn_open = h.NewElement('span', {
 			'innerHTML'   : CHEVRON_DOWN + CHEVRON_UP,
 			'className'   : 'button',
 			'aria-hidden' : 'true'
 		});
-		this.title_el.appendChild(this.btn_open);
+		this.title_btn.appendChild(this.btn_open);
 
 		this.settings_el = h.NewElement('div', {
 			'id'       : this.el.id + '_settings',
@@ -384,8 +386,18 @@ export default class SourceText {
 			this.status_el.setAttribute('hidden', 'hidden');
 	}
 
-	// a pane OBS cannot serve for this name: say so, and refuse every write
+	// a pane OBS cannot serve for this name: say so, and refuse every write.
+	// This call owns the pane from here: any seed still in flight is stale and
+	// must not revive it with state read before the source went away.
 	mark_unseeded (inMessage) {
+		this.seed_generation++;
+		this.seed_pending = false;
+
+		if (this.text_timer !== null) {
+			window.clearTimeout(this.text_timer);
+			this.text_timer = null;
+		}
+
 		this.seeded     = false;
 		this.text_value = '';
 		this.settings   = {};
@@ -459,7 +471,12 @@ export default class SourceText {
 		merged.font  = Object.assign({}, FONT_FALLBACK, defaults.font, user.font);
 
 		this.settings   = merged;
+
+		// accepted holds the style keys only: the text path reverts through its
+		// own text_value guard, so a text entry here would just go stale
 		this.accepted   = Object.assign({}, merged);
+		delete this.accepted.text;
+
 		this.text_value = (typeof merged.text === 'string') ? merged.text : '';
 		this.textarea.value = this.text_value;
 		this.seeded     = true;
