@@ -600,15 +600,7 @@ export default class WebRemote {
 				e.preventDefault()
 			}.bind(this), false);
 
-			// replace the bare one-line input with a pane seeded from OBS. The
-			// input stays in the DOM (hidden) so name/id and the selector fan-out
-			// below keep working exactly as before.
-			if (!item.wr_text_pane) {
-				item.wr_text_pane = new SourceText(item, this);
-				item.classList.add('wr-text-input-replaced');
-				item.parentNode.insertBefore(item.wr_text_pane.get_element(), item.nextSibling);
-				this.text_panes.push(item.wr_text_pane);
-			}
+			this.attach_text_pane(item);
 		});
 
 		// set up select elements
@@ -635,6 +627,118 @@ export default class WebRemote {
 				e.preventDefault()
 			}.bind(this), false);
 		});
+
+		// the list may have painted before the kind map arrived, so a text source
+		// written in markup and one OBS only knows about are handled the same way
+		this.refresh_text_panes();
+	}
+
+	/**
+	 * Swap a markup input for a pane seeded from OBS. The input stays in the DOM
+	 * (hidden) so name/id and the selector fan-out above keep working exactly as
+	 * before. Idempotent: an input that already has a pane keeps that one.
+	 */
+	attach_text_pane (inItem) {
+		if (!inItem)
+			return null;
+
+		if (!inItem.wr_text_pane) {
+			inItem.wr_text_pane = new SourceText(inItem, this);
+			inItem.classList.add('wr-text-input-replaced');
+			inItem.parentNode.insertBefore(inItem.wr_text_pane.get_element(), inItem.nextSibling);
+			this.text_panes.push(inItem.wr_text_pane);
+		}
+
+		return inItem.wr_text_pane;
+	}
+
+	/**
+	 * A pane per text source, decided by the kind map rather than by markup, so
+	 * no attribute is needed. Runs whenever the map arrives, which may be before
+	 * or after the list renders, and again after every invalidation.
+	 */
+	async sync_text_panes () {
+		const kinds = await this.get_input_kinds();
+
+		// a read that failed leaves the panes alone: the next event retries
+		if (!kinds)
+			return;
+
+		// a source that is gone keeps no pane. An auto-created row is dropped
+		// whole; an opted-in row stays and reports the loss when it is opened.
+		for (let i = this.text_panes.length - 1; i >= 0; i--) {
+			const pane = this.text_panes[i];
+			const el   = pane.input_el;
+
+			if (!el.wr_auto_source)
+				continue;
+
+			const kind = kinds.get(pane.name) || '';
+
+			if (kind.indexOf('text_') === 0)
+				continue;
+
+			pane.get_element().remove();
+			el.parentNode.remove();
+			this.text_panes.splice(i, 1);
+			delete el.wr_text_pane;
+			delete el.wr_auto_source;
+		}
+
+		kinds.forEach((kind, name) => {
+			if (!kind || kind.indexOf('text_') !== 0)
+				return;
+
+			const input = this.find_source_input(name) || this.create_source_input(name);
+
+			this.attach_text_pane(input);
+		});
+	}
+
+	// the kind map decides which panes exist, so a cleared map re-syncs them
+	refresh_text_panes () {
+		this.sync_text_panes().catch(this.log_async_error);
+	}
+
+	// the input an operator already wrote for this source, if any: the panes and
+	// the fan-out share one name rule, so they cannot disagree
+	find_source_input (inName) {
+		const all_inputs = document.getElementsByTagName('input');
+
+		for (let i = 0; i < all_inputs.length; i++) {
+			if (source_name_of(all_inputs[i]) === inName)
+				return all_inputs[i];
+		}
+
+		return null;
+	}
+
+	// a row for a text source nobody wrote markup for, so it gets a pane the same
+	// way an opted-in one does
+	create_source_input (inName) {
+		const list = document.getElementById('source_list');
+
+		if (!list)
+			return null;
+
+		const row = h.NewElement('li', {'className': 'source-item'});
+
+		const input = h.NewElement('input', {
+			'type': 'text',
+			'name': inName
+		});
+
+		input.wr_auto_source = inName;
+
+		input.addEventListener('change', (e) => {
+			this.set_text(e.target.name, e.target.value);
+			e.preventDefault();
+		}, false);
+
+		row.appendChild(input);
+		list.appendChild(row);
+
+		return input;
 	}
 
 	async set_text (inSource, inText) {
@@ -666,6 +770,10 @@ export default class WebRemote {
 	clear_input_kinds () {
 		this.input_kinds = null;
 		this.input_kinds_generation++;
+
+		// every call invalidates what the panes were built from, so re-read and
+		// re-sync: the panes must survive a reconnect and follow a changed list
+		this.refresh_text_panes();
 	}
 
 	async get_input_kinds () {

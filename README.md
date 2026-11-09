@@ -96,7 +96,7 @@ The pane opens on a click and reads the source when it opens. Each control write
 - Outline: `outline`, with `outline_size` and `outline_color`. Size and colour are disabled while outline is off.
 - Alignment: `align` and `valign`.
 
-Only GDI+ text sources (any `text_gdiplus*` kind) get the styling controls. Any other input, including FreeType text sources, gets the text box only. An opted-in input is replaced by a pane, and when OBS does not know the name the pane shows a not-found state and writes nothing.
+Every text source in OBS gets a pane automatically, with no markup. GDI+ text sources (any `text_gdiplus*` kind) also get the styling controls; any other input, including FreeType text sources, gets the text box only. The `data-wr-source` attribute is only needed to force a pane on some other input. When OBS does not know the name the pane shows a not-found state and writes nothing.
 
 ### Writing one value to several sources
 The `data-wr-selector` attribute lists the `id`s of the inputs above, separated by `|`. Each option's value is the text for those sources, in the same order, also separated by `|`. A change updates the matching input and sends its text to OBS. The ids in the attribute are the input ids, not the source names.
