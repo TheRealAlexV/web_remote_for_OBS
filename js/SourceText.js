@@ -55,7 +55,14 @@ export default class SourceText {
 		// one text write at a time: the newest value waits in text_pending
 		this.text_inflight = false;
 		this.text_pending  = false;
-		this.text_dirty    = false;
+
+		// every seed bumps this, so a read that finishes late cannot overwrite
+		// state from a newer seed; seed_pending retries one skipped for a write
+		this.seed_generation = 0;
+		this.seed_pending    = false;
+
+		// what OBS last confirmed, per key: the only safe value to revert to
+		this.accepted = {};
 
 		this.el = h.NewElement('div', {
 			'id'       : 'source_' + this.slug + '_text',
@@ -82,13 +89,12 @@ export default class SourceText {
 		});
 		this.title_el.appendChild(this.title_btn);
 
+		// decorative: the button above is the single control, so this must not
+		// take a click or a tab stop of its own
 		this.btn_open = h.NewElement('span', {
-			'title'    : 'Toggle text settings pane',
-			'innerHTML': CHEVRON_DOWN + CHEVRON_UP,
-			'className': 'button',
-			'events'   : {
-				'click': this.toggle_open.bind(this)
-			}
+			'innerHTML'   : CHEVRON_DOWN + CHEVRON_UP,
+			'className'   : 'button',
+			'aria-hidden' : 'true'
 		});
 		this.title_el.appendChild(this.btn_open);
 
@@ -383,17 +389,28 @@ export default class SourceText {
 		this.seeded     = false;
 		this.text_value = '';
 		this.settings   = {};
+		this.accepted   = {};
 		this.set_status(inMessage);
 		this.set_controls_enabled(false);
 	}
 
 	async seed () {
+		// any older seed still in flight is now stale: it must not write state
+		const generation = ++this.seed_generation;
+
+		this.seed_pending = false;
+
 		// a text write is in flight, so a read would return the value from before
-		// it and overwrite what the user is typing: keep local state instead
-		if (this.text_inflight)
+		// it and overwrite what the user is typing: retry once it settles
+		if (this.text_inflight) {
+			this.seed_pending = true;
 			return;
+		}
 
 		const kinds = await this.remote.get_input_kinds();
+
+		if (generation !== this.seed_generation)
+			return;
 
 		if (!kinds) {
 			this.mark_unseeded('Could not read this source.');
@@ -405,13 +422,15 @@ export default class SourceText {
 			return;
 		}
 
-		this.kind = kinds.get(this.name) || null;
+		const kind    = kinds.get(this.name) || null;
 
 		// FreeType and every other non-text kind get the text box only
-		const is_text = !!(this.kind && this.kind.indexOf('text_gdiplus') === 0);
-		this.el.classList.toggle('text-only', !is_text);
+		const is_text = !!(kind && kind.indexOf('text_gdiplus') === 0);
 
 		const user_res = await wrc.safeCall('GetInputSettings', {'inputName': this.name});
+
+		if (generation !== this.seed_generation)
+			return;
 
 		if (!user_res || !user_res.inputSettings) {
 			this.mark_unseeded('Could not read this source.');
@@ -422,9 +441,17 @@ export default class SourceText {
 
 		let defaults = {};
 		if (is_text) {
-			const def_res = await wrc.safeCall('GetInputDefaultSettings', {'inputKind': this.kind});
+			const def_res = await wrc.safeCall('GetInputDefaultSettings', {'inputKind': kind});
+
+			// a newer seed owns the pane now: whatever this one read is older
+			if (generation !== this.seed_generation)
+				return;
+
 			defaults = (def_res && def_res.inputSettings) || {};
 		}
+
+		this.kind = kind;
+		this.el.classList.toggle('text-only', !is_text);
 
 		// GetInputSettings returns only the keys the user has set; the defaults
 		// fill the rest. font is nested, so it merges key by key, not as a blob.
@@ -432,9 +459,9 @@ export default class SourceText {
 		merged.font  = Object.assign({}, FONT_FALLBACK, defaults.font, user.font);
 
 		this.settings   = merged;
+		this.accepted   = Object.assign({}, merged);
 		this.text_value = (typeof merged.text === 'string') ? merged.text : '';
 		this.textarea.value = this.text_value;
-		this.text_dirty = false;
 		this.seeded     = true;
 		this.set_status('');
 
@@ -474,8 +501,6 @@ export default class SourceText {
 	// --- text ----------------------------------------------------------------
 
 	on_text_input () {
-		this.text_dirty = true;
-
 		if (this.text_timer !== null)
 			window.clearTimeout(this.text_timer);
 
@@ -505,7 +530,6 @@ export default class SourceText {
 		const previous = this.text_value;
 
 		this.text_value    = value;
-		this.text_dirty    = false;
 		this.text_inflight = true;
 
 		const ok = await this.remote.set_text(this.name, value);
@@ -525,29 +549,32 @@ export default class SourceText {
 			this.text_pending = false;
 			await this.flush_text();
 		}
+
+		// a seed skipped while this write was in flight: run it now
+		if (this.seed_pending && !this.seeded) {
+			this.seed_pending = false;
+			await this.seed();
+		}
 	}
 
 	// called by WebRemote when some other control (the data-wr-selector fan-out)
 	// wrote text to this pane's source
 	set_remote_text (inSource, inText) {
-		if (inSource !== this.name && inSource !== this.id)
+		if (inSource !== this.name)
 			return;
 
 		// the user's own text in a focused box outranks the selector value they
 		// never saw: leave the box and text_value alone and let it flush on blur
-		if (document.activeElement === this.textarea) {
-			this.text_dirty = true;
+		if (document.activeElement === this.textarea)
 			return;
-		}
 
 		this.text_value = inText;
 		this.textarea.value = inText;
-		this.text_dirty = false;
 	}
 
 	// a source renamed in OBS no longer answers to this pane's name
 	on_source_renamed (inOldName) {
-		if (inOldName !== this.name && inOldName !== this.id)
+		if (inOldName !== this.name)
 			return;
 
 		this.mark_unseeded('Source not found in OBS.');
@@ -562,8 +589,7 @@ export default class SourceText {
 		if (!this.seeded || !this.settings.font)
 			return;
 
-		const previous = Object.assign({}, this.settings.font);
-		const font     = Object.assign({}, this.settings.font);
+		const font = Object.assign({}, this.settings.font);
 
 		font[inKey] = inValue;
 		this.settings.font = font;
@@ -572,10 +598,16 @@ export default class SourceText {
 		// face or flags, because overlay replaces a nested object whole
 		const ok = await this.remote.set_input_settings(this.name, {'font': font});
 
-		// revert only if this key still holds the value OBS rejected
-		if (!ok && this.settings.font[inKey] === inValue) {
-			this.settings.font = previous;
-			this.seed_font(previous);
+		if (ok) {
+			this.accepted.font = Object.assign({}, font);
+			return;
+		}
+
+		// revert only if this key still holds the value OBS rejected, and go back
+		// to the font OBS actually accepted, never an optimistic intermediate
+		if (this.settings.font[inKey] === inValue) {
+			this.settings.font = Object.assign({}, this.accepted.font);
+			this.seed_font(this.settings.font);
 		}
 	}
 
@@ -595,19 +627,24 @@ export default class SourceText {
 		if (!this.seeded)
 			return false;
 
-		const previous = this.settings[inKey];
-
 		this.settings[inKey] = inValue;
 
 		const ok = await this.remote.set_input_settings(this.name, {[inKey]: inValue});
 
-		// revert only if this key still holds the value OBS rejected
-		if (!ok && this.settings[inKey] === inValue) {
-			this.settings[inKey] = previous;
-			if (inRestore)
-				inRestore(previous);
+		if (ok) {
+			this.accepted[inKey] = inValue;
+			return true;
 		}
 
-		return ok;
+		// revert only if this key still holds the value OBS rejected, and go back
+		// to the last value OBS accepted, never an optimistic intermediate
+		if (this.settings[inKey] === inValue) {
+			this.settings[inKey] = this.accepted[inKey];
+
+			if (inRestore)
+				inRestore(this.accepted[inKey]);
+		}
+
+		return false;
 	}
 }

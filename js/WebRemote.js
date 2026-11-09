@@ -13,6 +13,7 @@ export default class WebRemote {
 		this.audio_list         = [];
 		this.text_panes         = [];
 		this.input_kinds        = null;
+		this.input_kinds_generation = 0;
 		this.tick               = 0;
 
 		this.video_width        = 1920;
@@ -112,6 +113,10 @@ export default class WebRemote {
 	}
 
 	on_connected () {
+		// the socket was down for a while: inputs may have come and gone, so the
+		// kind map from before the reconnect cannot be trusted
+		this.clear_input_kinds();
+
 		// one batch for the first paint; events keep it current afterwards
 		this.initial_poll().catch(this.log_async_error);
 
@@ -429,20 +434,20 @@ export default class WebRemote {
 
 	on_source_created (e) {
 		// a new input may be an audio-capable one, and it changes the kind map
-		this.input_kinds = null;
+		this.clear_input_kinds();
 		this.update_audio_list().catch(this.log_async_error);
 	}
 
 	on_source_destroyed (e) {
 		// a removed input leaves a stale kind behind, which decides whether an
 		// opted-in source gets the styling controls at all
-		this.input_kinds = null;
+		this.clear_input_kinds();
 		this.update_audio_list().catch(this.log_async_error);
 	}
 
 	on_source_renamed (e) {
 		// names changed, so the audio list labels and the kind map are stale
-		this.input_kinds = null;
+		this.clear_input_kinds();
 		this.update_audio_list().catch(this.log_async_error);
 
 		// a pane bound to the old name can no longer write to that source: say
@@ -656,16 +661,29 @@ export default class WebRemote {
 		return response !== null;
 	}
 
+	// drop the cached kind map; bumping the generation makes any read still in
+	// flight discard its result instead of repopulating a map we just dropped
+	clear_input_kinds () {
+		this.input_kinds = null;
+		this.input_kinds_generation++;
+	}
+
 	async get_input_kinds () {
 		// one read per session, cached. Used only to decide whether an opted-in
 		// input is a GDI+ text source; never to enumerate sources for the UI.
 		if (this.input_kinds)
 			return this.input_kinds;
 
-		const response = await wrc.safeCall('GetInputList');
+		const generation = this.input_kinds_generation;
+		const response   = await wrc.safeCall('GetInputList');
 
 		if (!response || !Array.isArray(response.inputs))
 			return null;
+
+		// something changed while this read was in flight, so the list may
+		// predate it: read again rather than cache a stale map
+		if (generation !== this.input_kinds_generation)
+			return this.get_input_kinds();
 
 		const kinds = new Map();
 

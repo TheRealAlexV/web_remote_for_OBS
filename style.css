@@ -1371,6 +1371,12 @@ li.status-edit-item span {
 	outline-offset: 2px;
 }
 
+/* the button replaced the title span, so dim it like the labels beside it */
+.source-text.disabled .text-source-toggle {
+	color: #aaa;
+	text-shadow: none;
+}
+
 /* a pane OBS cannot seed: one line that says so, above disabled controls */
 .source-text .text-source-status {
 	margin: 0 0 .5em;
