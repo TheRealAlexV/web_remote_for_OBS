@@ -1,6 +1,7 @@
 import * as h from './helper.js';
 import SourceScene from './SourceScene.js';
 import SourceAudio from './SourceAudio.js';
+import SourceText from './SourceText.js';
 
 export default class WebRemote {
 	constructor () {
@@ -10,6 +11,8 @@ export default class WebRemote {
 		this.scene_program      = '';
 		this.scene_preview      = '';
 		this.audio_list         = [];
+		this.text_panes         = [];
+		this.input_kinds        = null;
 		this.tick               = 0;
 
 		this.video_width        = 1920;
@@ -579,6 +582,16 @@ export default class WebRemote {
 				this.set_text(e.target.name, e.target.value);
 				e.preventDefault()
 			}.bind(this), false);
+
+			// replace the bare one-line input with a pane seeded from OBS. The
+			// input stays in the DOM (hidden) so name/id and the selector fan-out
+			// below keep working exactly as before.
+			if (!item.wr_text_pane) {
+				item.wr_text_pane = new SourceText(item, this);
+				item.classList.add('wr-text-input-replaced');
+				item.parentNode.insertBefore(item.wr_text_pane.get_element(), item.nextSibling);
+				this.text_panes.push(item.wr_text_pane);
+			}
 		});
 
 		// set up select elements
@@ -590,14 +603,16 @@ export default class WebRemote {
 
 				// assumption that length of values matches sources
 				for (var k = 0; k < sources.length; k++) {
-					// set value in UI (if it exists)
+					// the list holds input ids; the OBS input name is the name attr
 					let source_el = document.getElementById(sources[k]);
+					let source_name = (source_el && source_el.getAttribute('name')) || sources[k];
 
+					// set value in UI (if it exists)
 					if (source_el)
 						source_el.value = values[k];
 
 					// send value to OBS
-					this.set_text(sources[k], values[k]);
+					this.set_text(source_name, values[k]);
 				}
 
 				e.preventDefault()
@@ -607,11 +622,49 @@ export default class WebRemote {
 
 	async set_text (inSource, inText) {
 		// v5 has no per-source-kind text request; the settings key is 'text'
-		await wrc.safeCall('SetInputSettings', {
+		const ok = await this.set_input_settings(inSource, { text: inText });
+
+		// keep a pane bound to this source in step with the write, e.g. after the
+		// data-wr-selector fan-out sets several sources at once
+		if (ok)
+			this.text_panes.forEach((pane) => pane.set_remote_text(inSource, inText));
+
+		return ok;
+	}
+
+	async set_input_settings (inSource, inSettings) {
+		// overlay is shallow: omitted top-level keys survive, but a nested object
+		// (font) is replaced whole, so callers must send that one complete
+		const response = await wrc.safeCall('SetInputSettings', {
 			inputName: inSource,
-			inputSettings: { text: inText },
+			inputSettings: inSettings,
 			overlay: true,
 		});
+
+		return response !== null;
+	}
+
+	async get_input_kinds () {
+		// one read per session, cached. Used only to decide whether an opted-in
+		// input is a GDI+ text source; never to enumerate sources for the UI.
+		if (this.input_kinds)
+			return this.input_kinds;
+
+		const response = await wrc.safeCall('GetInputList');
+
+		if (!response || !Array.isArray(response.inputs))
+			return null;
+
+		const kinds = new Map();
+
+		response.inputs.forEach((input) => {
+			if (input && input.inputName)
+				kinds.set(input.inputName, input.inputKind || '');
+		});
+
+		this.input_kinds = kinds;
+
+		return kinds;
 	}
 
 	update_status_list (results) {

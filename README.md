@@ -68,16 +68,40 @@ Web remote UI for controlling [OBS Studio](https://obsproject.com/) through the 
 - Volume meters only update for inputs that are actively producing audio; that is what obs-websocket reports.
 - For more, see [Issues](https://github.com/dvangennip/web_remote_for_OBS/issues)
 
-## Adding text source editing
-To add text source editing:
-1. Make sure a new "inputs" tab is added. See the "Getting inputs and scenes" below for more details.
-2. Add an `input_edit_list` element to the "Inputs" tab: `<ul id="input_edit_list" class="source-list">`
-3. Add an `input_select_list` element to the "Inputs" tab: `<ul id="input_select_list" class="source-list">`
-4. Add `SourceText.js` to `index.html` (only if text editing is needed)
-5. Add Input class to instantiate the input list and set up connections
-6. Add creation of SourceText instance to `get_inputs` in `base.js` (only if text editing is needed)
+## Editing text sources
+The app never lists your sources. You opt in to the ones you want by adding an `<input>` with a `data-wr-source` attribute to the `#source_list` list in `index.html`. The input's `name` must be the OBS source name. After the app connects, each opted-in input is replaced by a collapsible pane seeded from OBS, so you edit the text the source already holds instead of overwriting it.
 
-Note that this is a work in progress. The input list will show all inputs, including audio inputs, which cannot be edited as text sources.
+A complete block for two sources, plus a selector that writes one value to both:
+
+```html
+<ul id="source_list" class="source-list">
+	<li>
+		<input type="text" id="name_a" name="Name A" data-wr-source="Name A">
+	</li>
+	<li>
+		<input type="text" id="name_b" name="Name B" data-wr-source="Name B">
+	</li>
+</ul>
+<select data-wr-selector="name_a|name_b">
+	<option value="Both|Both">Both</option>
+	<option value="First|Second">First and second</option>
+</select>
+```
+
+The pane opens on a click and reads the source when it opens. Each control writes its own setting to OBS on change:
+
+- Text: a multi-line box. It writes 300 ms after you stop typing, and at once when the box loses focus or the pane collapses.
+- Font and size: the `font` object. OBS resolves the face name and falls back when the name is unknown.
+- Colour and opacity: `color` and `opacity`. Colour is a picker; opacity is 0 to 100.
+- Outline: `outline`, with `outline_size` and `outline_color`. Size and colour are disabled while outline is off.
+- Alignment: `align` and `valign`.
+
+Only GDI+ text sources (`text_gdiplus_v2`, `text_gdiplus_v3`) get the styling controls. Any other input, including FreeType text sources, gets the text box only. An input whose name OBS does not know keeps behaving like the plain input it was.
+
+### Writing one value to several sources
+The `data-wr-selector` attribute lists the `id`s of the inputs above, separated by `|`. Each option's value is the text for those sources, in the same order, also separated by `|`. A change updates the matching input and sends its text to OBS. The ids in the attribute are the input ids, not the source names.
+
+The example above writes `Both` to `Name A` and `Name B`, or `First` to `Name A` and `Second` to `Name B`.
 
 ## License
 - [Unlicense](https://unlicense.org/): This is free and unencumbered software released into the public domain.

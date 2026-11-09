@@ -68,16 +68,40 @@ Interface web para controlar o [OBS Studio](https://obsproject.com/) pelo servid
 - Os medidores de volume só se atualizam para fontes que estão produzindo áudio de fato; é o que o obs-websocket informa.
 - Para mais detalhes, veja as [issues](https://github.com/dvangennip/web_remote_for_OBS/issues)
 
-## Como adicionar edição de fonte de texto
-Para adicionar edição de fonte de texto:
-1. Garanta que exista uma aba "inputs" nova. Veja "Obtendo entradas e cenas" abaixo para os detalhes.
-2. Adicione um elemento `input_edit_list` à aba "Inputs": `<ul id="input_edit_list" class="source-list">`
-3. Adicione um elemento `input_select_list` à aba "Inputs": `<ul id="input_select_list" class="source-list">`
-4. Inclua `SourceText.js` no `index.html` (só se a edição de texto for necessária)
-5. Adicione a classe Input para instanciar a lista de entradas e montar as conexões
-6. Adicione a criação da instância de SourceText em `get_inputs`, no `base.js` (só se a edição de texto for necessária)
+## Edição de fontes de texto
+O app não lista suas fontes. Você escolhe as que quer editar adicionando um `<input>` com o atributo `data-wr-source` à lista `#source_list` no `index.html`. O `name` do input precisa ser o nome da fonte no OBS. Depois que o app conecta, cada input escolhido é trocado por um painel recolhível preenchido a partir do OBS, então você edita o texto que a fonte já tem em vez de sobrescrevê-lo.
 
-Isso ainda está em desenvolvimento. A lista de entradas mostra todas as entradas, inclusive as de áudio, que não podem ser editadas como fonte de texto.
+Um bloco completo para duas fontes, com um seletor que escreve um valor nas duas:
+
+```html
+<ul id="source_list" class="source-list">
+	<li>
+		<input type="text" id="name_a" name="Name A" data-wr-source="Name A">
+	</li>
+	<li>
+		<input type="text" id="name_b" name="Name B" data-wr-source="Name B">
+	</li>
+</ul>
+<select data-wr-selector="name_a|name_b">
+	<option value="Both|Both">Ambas</option>
+	<option value="First|Second">Primeira e segunda</option>
+</select>
+```
+
+O painel abre com um clique e lê a fonte quando abre. Cada controle escreve a própria configuração no OBS ao mudar:
+
+- Texto: caixa de várias linhas. Grava 300 ms depois que você para de digitar, e na hora quando a caixa perde o foco ou o painel recolhe.
+- Fonte e tamanho: o objeto `font`. O OBS resolve o nome da fonte e usa outra quando o nome não existe.
+- Cor e opacidade: `color` e `opacity`. A cor é um seletor; a opacidade vai de 0 a 100.
+- Contorno: `outline`, com `outline_size` e `outline_color`. Tamanho e cor ficam desativados enquanto o contorno está desligado.
+- Alinhamento: `align` e `valign`.
+
+Só fontes de texto GDI+ (`text_gdiplus_v2`, `text_gdiplus_v3`) recebem os controles de estilo. Qualquer outra entrada, inclusive fontes de texto FreeType, recebe só a caixa de texto. Um input cujo nome o OBS não conhece continua se comportando como o input simples que era.
+
+### Escrever um valor em várias fontes
+O atributo `data-wr-selector` lista os `id` dos inputs acima, separados por `|`. O valor de cada opção é o texto para essas fontes, na mesma ordem, também separado por `|`. Ao mudar, o app atualiza o input correspondente e envia o texto ao OBS. Os ids do atributo são os ids dos inputs, não os nomes das fontes.
+
+O exemplo acima escreve `Both` em `Name A` e `Name B`, ou `First` em `Name A` e `Second` em `Name B`.
 
 ## Licença
 - [Unlicense](https://unlicense.org/): software livre e sem restrições, liberado para o domínio público.
