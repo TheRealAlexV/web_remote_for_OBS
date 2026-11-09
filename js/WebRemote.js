@@ -777,6 +777,11 @@ export default class WebRemote {
 	}
 
 	async get_input_kinds () {
+		// before the socket opens a read can only fail and log: let on_connected
+		// clear the map and re-sync instead of calling into a closed connection
+		if (!this.is_connection_open())
+			return null;
+
 		// one read per session, cached. Used only to decide whether an opted-in
 		// input is a GDI+ text source; never to enumerate sources for the UI.
 		if (this.input_kinds)
