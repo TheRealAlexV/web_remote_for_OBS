@@ -69,9 +69,9 @@ Web remote UI for controlling [OBS Studio](https://obsproject.com/) through the 
 - For more, see [Issues](https://github.com/dvangennip/web_remote_for_OBS/issues)
 
 ## Editing text sources
-The app never lists your sources. You opt in to the ones you want by adding an `<input>` with a `data-wr-source` attribute to the `#source_list` list in `index.html`. The input's `name` must be the OBS source name. After the app connects, each opted-in input is replaced by a collapsible pane seeded from OBS, so you edit the text the source already holds instead of overwriting it.
+The app gives every text source in OBS a collapsible pane automatically, with no markup. Adding an `<input>` with a `data-wr-source` attribute to the `#source_list` list in `index.html` is optional: use it only to force a pane on an input OBS does not report as a text source. The input's `name` must be the OBS source name. Either way the pane is seeded from OBS when it opens, so you edit the text the source already holds instead of overwriting it.
 
-A complete block for two sources, plus a selector that writes one value to both:
+The optional markup path, for two sources, plus a selector that writes one value to both:
 
 ```html
 <ul id="source_list" class="source-list">
@@ -96,7 +96,7 @@ The pane opens on a click and reads the source when it opens. Each control write
 - Outline: `outline`, with `outline_size` and `outline_color`. Size and colour are disabled while outline is off.
 - Alignment: `align` and `valign`.
 
-Every text source in OBS gets a pane automatically, with no markup. GDI+ text sources (any `text_gdiplus*` kind) also get the styling controls; any other input, including FreeType text sources, gets the text box only. The `data-wr-source` attribute is only needed to force a pane on some other input. When OBS does not know the name the pane shows a not-found state and writes nothing.
+Every text source in OBS gets a pane automatically, with no markup. GDI+ text sources (any `text_gdiplus*` kind) also get the styling controls; any other input, including FreeType text sources, gets the text box only. The `data-wr-source` attribute is only needed to force a pane on an input OBS does not report as a text source, and OBS rejects text writes to those inputs: the pane renders, but it cannot save. When OBS does not know the name the pane shows a not-found state and writes nothing.
 
 ### Writing one value to several sources
 The `data-wr-selector` attribute lists the `id`s of the inputs above, separated by `|`. Each option's value is the text for those sources, in the same order, also separated by `|`. A change updates the matching input and sends its text to OBS. The ids in the attribute are the input ids, not the source names.

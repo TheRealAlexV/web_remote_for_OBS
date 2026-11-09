@@ -634,7 +634,8 @@ export default class WebRemote {
 	}
 
 	/**
-	 * Swap a markup input for a pane seeded from OBS. The input stays in the DOM
+	 * Attach a pane to an input, whether the operator wrote the input in markup or
+	 * sync_text_panes created it for an OBS text source. The input stays in the DOM
 	 * (hidden) so name/id and the selector fan-out above keep working exactly as
 	 * before. Idempotent: an input that already has a pane keeps that one.
 	 */
@@ -678,8 +679,10 @@ export default class WebRemote {
 			if (kind.indexOf('text_') === 0)
 				continue;
 
+			pane.destroy();
 			pane.get_element().remove();
-			el.parentNode.remove();
+			if (el.parentNode)
+				el.parentNode.remove();
 			this.text_panes.splice(i, 1);
 			delete el.wr_text_pane;
 			delete el.wr_auto_source;
@@ -703,11 +706,16 @@ export default class WebRemote {
 	// the input an operator already wrote for this source, if any: the panes and
 	// the fan-out share one name rule, so they cannot disagree
 	find_source_input (inName) {
-		const all_inputs = document.getElementsByTagName('input');
+		const list = document.getElementById('source_list');
 
-		for (let i = 0; i < all_inputs.length; i++) {
-			if (source_name_of(all_inputs[i]) === inName)
-				return all_inputs[i];
+		if (!list)
+			return null;
+
+		const inputs = list.getElementsByTagName('input');
+
+		for (let i = 0; i < inputs.length; i++) {
+			if (source_name_of(inputs[i]) === inName)
+				return inputs[i];
 		}
 
 		return null;
@@ -782,8 +790,8 @@ export default class WebRemote {
 		if (!this.is_connection_open())
 			return null;
 
-		// one read per session, cached. Used only to decide whether an opted-in
-		// input is a GDI+ text source; never to enumerate sources for the UI.
+		// one read per session, cached. The kind map decides which text sources get
+		// a pane and whether that pane also gets the GDI+ styling controls.
 		if (this.input_kinds)
 			return this.input_kinds;
 

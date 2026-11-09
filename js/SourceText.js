@@ -406,6 +406,24 @@ export default class SourceText {
 		this.set_controls_enabled(false);
 	}
 
+	/**
+	 * Tear the pane down for good when its row is pruned. The debounce must not
+	 * fire after the row is gone, and a seed already in flight must not write to
+	 * a removed pane. Every listener this class adds lives on the removed subtree.
+	 */
+	destroy () {
+		if (this.text_timer !== null) {
+			window.clearTimeout(this.text_timer);
+			this.text_timer = null;
+		}
+
+		// invalidate any seed in flight; clear the queued write state as well
+		this.seed_generation++;
+		this.seed_pending = false;
+		this.text_pending = false;
+		this.seeded       = false;
+	}
+
 	async seed () {
 		// any older seed still in flight is now stale: it must not write state
 		const generation = ++this.seed_generation;

@@ -69,9 +69,9 @@ Interface web para controlar o [OBS Studio](https://obsproject.com/) pelo servid
 - Para mais detalhes, veja as [issues](https://github.com/dvangennip/web_remote_for_OBS/issues)
 
 ## Edição de fontes de texto
-O app não lista suas fontes. Você escolhe as que quer editar adicionando um `<input>` com o atributo `data-wr-source` à lista `#source_list` no `index.html`. O `name` do input precisa ser o nome da fonte no OBS. Depois que o app conecta, cada input escolhido é trocado por um painel recolhível preenchido a partir do OBS, então você edita o texto que a fonte já tem em vez de sobrescrevê-lo.
+O app cria um painel recolhível para cada fonte de texto do OBS automaticamente, sem marcação. Adicionar um `<input>` com o atributo `data-wr-source` à lista `#source_list` no `index.html` é opcional: use só para forçar um painel em uma entrada que o OBS não informa como fonte de texto. O `name` do input precisa ser o nome da fonte no OBS. Nos dois casos o painel é preenchido a partir do OBS quando abre, então você edita o texto que a fonte já tem em vez de sobrescrevê-lo.
 
-Um bloco completo para duas fontes, com um seletor que escreve um valor nas duas:
+O caminho opcional por marcação, para duas fontes, com um seletor que escreve um valor nas duas:
 
 ```html
 <ul id="source_list" class="source-list">
@@ -96,7 +96,7 @@ O painel abre com um clique e lê a fonte quando abre. Cada controle escreve a p
 - Contorno: `outline`, com `outline_size` e `outline_color`. Tamanho e cor ficam desativados enquanto o contorno está desligado.
 - Alinhamento: `align` e `valign`.
 
-Toda fonte de texto no OBS ganha um painel automaticamente, sem marcação. Fontes de texto GDI+ (qualquer tipo `text_gdiplus*`) também recebem os controles de estilo; qualquer outra entrada, inclusive fontes de texto FreeType, recebe só a caixa de texto. O atributo `data-wr-source` só é necessário para forçar um painel em alguma outra entrada. Quando o OBS não conhece o nome, o painel mostra um estado de não encontrado e não grava nada.
+Toda fonte de texto no OBS ganha um painel automaticamente, sem marcação. Fontes de texto GDI+ (qualquer tipo `text_gdiplus*`) também recebem os controles de estilo; qualquer outra entrada, inclusive fontes de texto FreeType, recebe só a caixa de texto. O atributo `data-wr-source` só é necessário para forçar um painel em uma entrada que o OBS não informa como fonte de texto, e o OBS rejeita gravações de texto nessas entradas: o painel aparece, mas não consegue salvar. Quando o OBS não conhece o nome, o painel mostra um estado de não encontrado e não grava nada.
 
 ### Escrever um valor em várias fontes
 O atributo `data-wr-selector` lista os `id` dos inputs acima, separados por `|`. O valor de cada opção é o texto para essas fontes, na mesma ordem, também separado por `|`. Ao mudar, o app atualiza o input correspondente e envia o texto ao OBS. Os ids do atributo são os ids dos inputs, não os nomes das fontes.
