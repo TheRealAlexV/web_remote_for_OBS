@@ -1038,6 +1038,140 @@ async function runCurationChecks () {
 	}
 }
 
+// --- the click guard --------------------------------------------------------
+//
+// A grip press leaves exactly one click behind, and that click must not switch a
+// scene. It must also not take the next real click with it: a document-wide
+// window used to swallow every click in the app for 400 ms after any grip
+// interaction, and a click that arrived later than that slipped through.
+async function runClickGuardChecks () {
+	const armed = await evaluate(`(() => {
+		const wr   = window.wr;
+		const rows = [...document.querySelectorAll('#scene_list li.scene')];
+
+		if (!wr || !rows.length)
+			return { error: 'no rendered scene row to click' };
+
+		const row   = rows[0];
+		const grip  = row.querySelector('.wr-grip');
+		const scene = Object.values(wr.scenes).find((item) => item.el === row);
+
+		if (!grip || !scene)
+			return { error: 'the first scene row has no grip or no scene object' };
+
+		const clicked = [];
+		const probe   = { row: row, original: scene.set_scene, clicked: clicked };
+
+		// the check must never reach OBS: record the attempt instead
+		scene.set_scene = () => clicked.push(row.dataset.wrKey);
+		window.__wr_click_probe = probe;
+
+		// a synthetic pointer is never active, so capture would throw before the
+		// press could arm the guard
+		const capture = row.setPointerCapture;
+		row.setPointerCapture = () => {};
+		row.hasPointerCapture = () => false;
+
+		const pointer = (type) => new PointerEvent(type, {
+			bubbles: true, cancelable: true, pointerId: 7,
+			pointerType: 'mouse', button: 0, buttons: 1,
+			clientX: 4, clientY: 4,
+		});
+
+		grip.dispatchEvent(pointer('pointerdown'));
+
+		const armed_pointer = wr.drag_click_pointer;
+		const dragging      = row.classList.contains('wr-row-dragging');
+
+		row.dispatchEvent(pointer('pointerup'));
+
+		const still_dragging = row.classList.contains('wr-row-dragging');
+
+		// the click a press with no move leaves behind lands on the row
+		row.dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, pointerId: 7 }));
+
+		const swallowed = clicked.length;
+
+		row.setPointerCapture = capture;
+		delete row.hasPointerCapture;
+
+		return {
+			armed_pointer: armed_pointer,
+			dragging: dragging,
+			still_dragging: still_dragging,
+			swallowed: swallowed,
+		};
+	})()`);
+
+	if (armed.error)
+		throw new Error(armed.error);
+
+	if (armed.armed_pointer !== 7)
+		throw new Error(`a grip press did not arm the click guard (drag_click_pointer = ${JSON.stringify(armed.armed_pointer)})`);
+
+	if (!armed.dragging || armed.still_dragging)
+		throw new Error('a grip press did not start, or its release did not finish, the drag');
+
+	if (armed.swallowed !== 0)
+		throw new Error('the click a grip press leaves behind did switch a scene');
+
+	console.log('PASS: a grip press leaves one click behind, and that click does not switch the scene');
+
+	const rect = await evaluate(`(() => {
+		const probe = window.__wr_click_probe;
+		const el    = probe.row.querySelector('label') || probe.row;
+
+		el.scrollIntoView({ block: 'center' });
+
+		const box = el.getBoundingClientRect();
+		return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+	})()`);
+
+	const started = Date.now();
+
+	await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved',    x: rect.x, y: rect.y, button: 'none' });
+	await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed',  x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
+	await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
+
+	const elapsed     = Date.now() - started;
+	const after_click = await evaluate(`window.__wr_click_probe.clicked.length`);
+
+	if (after_click !== 1)
+		throw new Error(`a click ${elapsed} ms after a finished drag did not reach the row (switches recorded: ${after_click})`);
+
+	console.log(`PASS: a click ${elapsed} ms after a finished drag still reaches the row`);
+
+	// the guard is spent: a later click must not be taken as well
+	const after_second = await evaluate(`(() => {
+		const probe = window.__wr_click_probe;
+
+		probe.row.dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, pointerId: 7 }));
+		return probe.clicked.length;
+	})()`);
+
+	if (after_second !== 2)
+		throw new Error(`the guard swallowed more than the one click it was armed for (switches recorded: ${after_second})`);
+
+	console.log('PASS: the guard is spent after one click; the next one reaches the row');
+
+	// leave the page as it was found: the stub must not outlive this check
+	await evaluate(`(() => {
+		const probe = window.__wr_click_probe;
+
+		if (!probe)
+			return;
+
+		const scene = Object.values(window.wr.scenes).find((item) => item.el === probe.row);
+
+		if (scene && probe.original)
+			scene.set_scene = probe.original;
+		else if (scene)
+			delete scene.set_scene;
+
+		delete window.__wr_click_probe;
+	})()`);
+}
+
 try {
 	console.log(`node ${process.version}, chrome ${chromePath}`);
 
@@ -1115,8 +1249,10 @@ try {
 	await assertNoPageErrors();
 
 	// f. hiding, manual order and dashboards reach the rendered lists
-	if (!SMOKE_SCENE)
+	if (!SMOKE_SCENE) {
 		await runCurationChecks();
+		await runClickGuardChecks();
+	}
 
 	if (SMOKE_SCENE)
 		await runSceneSwitch(SMOKE_SCENE);

@@ -4,6 +4,11 @@ import SourceAudio from './SourceAudio.js';
 import SourceText, {source_name as source_name_of} from './SourceText.js';
 import ViewState, {STORAGE_KEY} from './ViewState.js';
 
+// the one definition of "this input is a text source"
+function is_text_kind (kind) {
+	return typeof kind === 'string' && kind.indexOf('text_') === 0;
+}
+
 export default class WebRemote {
 	constructor () {
 		this.studio_mode        = false;
@@ -29,7 +34,7 @@ export default class WebRemote {
 		this.prune_signature    = null;
 		this.audio_refresh_pending = false;
 		this.drag               = null;
-		this.drag_suppress_until = 0;
+		this.drag_click_pointer = null;   // pointer id whose trailing click is swallowed
 		this.drag_move_bound    = this.on_row_drag_move.bind(this);
 		this.drag_end_bound     = this.on_row_drag_end.bind(this);
 
@@ -136,6 +141,11 @@ export default class WebRemote {
 		// the socket was down for a while: inputs may have come and gone, so the
 		// kind map from before the reconnect cannot be trusted
 		this.clear_input_kinds();
+
+		// a reconnect re-earns the prune: two polls that agreed before the drop
+		// say nothing about the collection now
+		this.view_pruned     = false;
+		this.prune_signature = null;
 
 		// one batch for the first paint; events keep it current afterwards
 		this.initial_poll().catch(this.log_async_error);
@@ -249,8 +259,14 @@ export default class WebRemote {
 
 		// a view change that could not re-read the inputs leaves the audio DOM
 		// disagreeing with the store; retry here rather than on the next event
-		if (this.audio_refresh_pending && generation === this.connection_generation)
-			await this.update_audio_list();
+		if (this.audio_refresh_pending && generation === this.connection_generation) {
+			try {
+				await this.update_audio_list();
+			} catch (e) {
+				// a rejected refresh must not cost the tick its re-arm
+				this.log_async_error(e);
+			}
+		}
 
 		// reset interval timeout, but only while this tick still belongs to the
 		// current connection
@@ -492,15 +508,20 @@ export default class WebRemote {
 			// uuid-keyed scenes keep their key through a rename; a name-keyed
 			// one (OBS 28) follows the name so the hidden list stops lying
 			const old_key = 'name:' + old_name;
+			const new_key = 'name:' + new_name;
 
 			if (this.scene_names.has(old_key)) {
 				this.scene_names.delete(old_key);
-				this.scene_names.set('name:' + new_name, new_name);
-			}
+				this.scene_names.set(new_key, new_name);
 
-			if (scene.el && scene.el.dataset.wrKey === old_key) {
-				scene.key = 'name:' + new_name;
-				scene.el.dataset.wrKey = scene.key;
+				// the stored lists follow the key too, or a hidden scene
+				// reappears and the stale key hides its successor
+				this.view.rename_key('scenes', old_key, new_key);
+
+				if (scene.el && scene.el.dataset.wrKey === old_key) {
+					scene.key = new_key;
+					scene.el.dataset.wrKey = new_key;
+				}
 			}
 
 			// this.scenes is keyed by name, so move the entry with the tile
@@ -521,7 +542,11 @@ export default class WebRemote {
 	}
 
 	on_scenes_changed (e) {
-		// v5 payload carries no uuids and no program/preview summary, so re-read
+		// v5 payload carries no uuids and no program/preview summary, so re-read.
+		// A collection switch re-earns the prune: agreement from the last one
+		// says nothing about this one.
+		this.view_pruned     = false;
+		this.prune_signature = null;
 		this.get_scene_list().catch(this.log_async_error);
 	}
 
@@ -546,9 +571,15 @@ export default class WebRemote {
 		// a pane bound to the old name can no longer write to that source: say
 		// so rather than letting it reject every write in silence
 		const old_name = e && e.oldInputName;
+		const new_name = e && e.inputName;
 
 		if (old_name)
 			this.text_panes.forEach((pane) => pane.on_source_renamed(old_name));
+
+		// inputs without uuids are keyed by name, so the stored keys follow the
+		// rename here as well, or a hidden input comes back under its new name
+		if (old_name && new_name && old_name !== new_name)
+			this.view.rename_key('audio', 'name:' + old_name, 'name:' + new_name);
 	}
 
 	async transition () {
@@ -872,7 +903,7 @@ export default class WebRemote {
 			const kind = el ? (kinds.get(pane.name) || '') : '';
 			const uuid = el ? this.input_uuids.get(pane.name) : null;
 			const gone = !el ||
-				kind.indexOf('text_') !== 0 ||
+				!is_text_kind(kind) ||
 				(uuid && !this.view.visible('audio', uuid));
 
 			if (!gone)
@@ -903,7 +934,7 @@ export default class WebRemote {
 		}
 
 		kinds.forEach((kind, name) => {
-			if (!kind || kind.indexOf('text_') !== 0)
+			if (!is_text_kind(kind))
 				return;
 
 			const uuid     = this.input_uuids.get(name);
@@ -944,20 +975,28 @@ export default class WebRemote {
 		if (this.view_pruned)
 			return;
 
-		if (!this.raw_scenes.length || !this.input_names.size)
+		// each kind is judged on its own live set: a rig with no inputs must not
+		// keep stale scene keys for ever, and a failed GetInputList must never
+		// license a prune of the audio list
+		const scene_keys = this.raw_scenes.length
+			? this.raw_scenes.map((scene) => this.scene_key(scene)).filter(Boolean)
+			: null;
+		const input_keys = this.input_names.size ? [...this.input_names.keys()] : null;
+
+		if (!scene_keys && !input_keys)
 			return;
 
-		const scene_keys = this.raw_scenes.map((scene) => this.scene_key(scene)).filter(Boolean);
-		const input_keys = [...this.input_names.keys()];
-		const signature  = scene_keys.slice().sort().join('|') +
-			'#' + input_keys.slice().sort().join('|');
+		const signature = (scene_keys || []).slice().sort().join('|') +
+			'#' + (input_keys || []).slice().sort().join('|');
 
 		if (signature !== this.prune_signature) {
 			this.prune_signature = signature;
 			return;
 		}
 
-		const removed = this.view.prune(scene_keys, input_keys);
+		// an empty list here means "not known", which prune() already treats as
+		// "leave that kind alone"
+		const removed = this.view.prune(scene_keys || [], input_keys || []);
 
 		if (removed.scenes || removed.audio)
 			console.log('WebRemote: pruned ' + removed.scenes + ' stale scene keys and ' +
@@ -989,7 +1028,22 @@ export default class WebRemote {
 	}
 
 	is_row_click_suppressed () {
-		return performance.now() < this.drag_suppress_until;
+		return this.drag_click_pointer !== null;
+	}
+
+	// the document guard consumes the one click a grip press leaves behind; this
+	// keeps a row handler that somehow saw the same click from acting on it too
+	consume_row_click_suppress (e) {
+		if (this.drag_click_pointer === null)
+			return false;
+
+		// a click carries the pointer that produced it; a synthetic one may not,
+		// and then this press is the only thing it can belong to
+		if (e && e.pointerId !== undefined && e.pointerId !== this.drag_click_pointer)
+			return false;
+
+		this.drag_click_pointer = null;
+		return true;
 	}
 
 	// anything that changes the view re-renders the lists it governs
@@ -1077,7 +1131,7 @@ export default class WebRemote {
 			return out;
 
 		this.input_kinds.forEach((kind, name) => {
-			if (!kind || kind.indexOf('text_') !== 0)
+			if (!is_text_kind(kind))
 				return;
 
 			const key = this.input_uuids.get(name);
@@ -1170,11 +1224,16 @@ export default class WebRemote {
 		e.preventDefault();
 		e.stopPropagation();
 
+		// a second grip pressed before the first pointer ends would take this.drag
+		// away from it, leaving that row stuck mid-drag with its listeners on
+		if (this.drag)
+			this.release_row_drag(this.drag);
+
 		el.setPointerCapture(e.pointerId);
 
-		// a press that never moves still ends in a click; window it from the
-		// press as well as the release, so the row cannot switch scene
-		this.drag_suppress_until = performance.now() + 400;
+		// a press that never moves still ends in a click, so arm the one-shot
+		// suppression now: that click, and only that one, is discarded
+		this.drag_click_pointer = e.pointerId;
 
 		this.drag = {
 			el        : el,
@@ -1232,24 +1291,35 @@ export default class WebRemote {
 		if (!drag || e.pointerId !== drag.pointer_id)
 			return;
 
-		drag.el.removeEventListener('pointermove', this.drag_move_bound, false);
-		drag.el.removeEventListener('pointerup', this.drag_end_bound, false);
-		drag.el.removeEventListener('pointercancel', this.drag_end_bound, false);
-		drag.el.classList.remove('wr-row-dragging');
+		this.release_row_drag(drag);
 
-		if (drag.el.hasPointerCapture && drag.el.hasPointerCapture(e.pointerId))
-			drag.el.releasePointerCapture(e.pointerId);
-
-		this.drag = null;
-
-		// whichever way the press ended, the click it leaves behind is not a
-		// scene switch; the capture-phase guard in setup_view_bar swallows it
-		this.drag_suppress_until = performance.now() + 400;
+		// a cancelled gesture leaves no click behind; a release does, and the
+		// capture-phase guard discards exactly that one
+		if (e.type === 'pointercancel')
+			this.drag_click_pointer = null;
 
 		if (!drag.moved)
 			return;
 
 		this.commit_row_order(drag.kind);
+	}
+
+	// drop the listeners and the styling of a drag through the element that
+	// carries them, not through whatever this.drag points at now
+	release_row_drag (drag) {
+		if (!drag)
+			return;
+
+		drag.el.removeEventListener('pointermove', this.drag_move_bound, false);
+		drag.el.removeEventListener('pointerup', this.drag_end_bound, false);
+		drag.el.removeEventListener('pointercancel', this.drag_end_bound, false);
+		drag.el.classList.remove('wr-row-dragging');
+
+		if (drag.el.hasPointerCapture && drag.el.hasPointerCapture(drag.pointer_id))
+			drag.el.releasePointerCapture(drag.pointer_id);
+
+		if (this.drag === drag)
+			this.drag = null;
 	}
 
 	// --- the dashboard header ----------------------------------------------
@@ -1277,11 +1347,23 @@ export default class WebRemote {
 
 		this.viewbar_sig = '';
 
-		// A press on a grip ends in a click that can land outside the row's
-		// tools; swallow it in the capture phase rather than trusting the target
+		// A grip press leaves exactly one click behind, and that click is not a
+		// scene switch. Swallow that one, keyed to the pointer that pressed: a
+		// document-wide time window also ate unrelated clicks and let a click
+		// that arrived late through. A new press means the old click never
+		// arrived, so disarm before it can cost a real one; a cancel leaves no
+		// click at all.
 		document.addEventListener('click', (e) => {
-			if (this.is_row_click_suppressed())
+			if (this.consume_row_click_suppress(e))
 				e.stopPropagation();
+		}, true);
+
+		document.addEventListener('pointerdown', () => {
+			this.drag_click_pointer = null;
+		}, true);
+
+		document.addEventListener('pointercancel', () => {
+			this.drag_click_pointer = null;
 		}, true);
 
 		// another tab (a phone next to a desktop) wrote the view: adopt it
@@ -1386,9 +1468,14 @@ export default class WebRemote {
 
 		bar.hidden_btn.textContent = 'Hidden (' + hidden_count + ')';
 
-		// a write that failed leaves the screen lying about what was kept
-		if (bar.save_warning)
+		// a write that failed leaves the screen lying about what was kept, while
+		// a newer version disables saving on purpose: that is not a failure
+		if (bar.save_warning) {
+			bar.save_warning.textContent = this.view.future
+				? 'This view was saved by a newer version'
+				: 'Changes cannot be saved in this browser';
 			bar.save_warning.hidden = this.view.can_save();
+		}
 
 		if (!bar.hidden_panel.hidden)
 			this.render_hidden_panel();

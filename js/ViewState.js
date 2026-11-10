@@ -113,8 +113,9 @@ function normalize (raw, stats) {
 
 export default class ViewState {
 	constructor () {
-		this._live = {}; // last live uuid list per kind, from effective_order()
-		this.data  = empty_blob();
+		this._live       = {}; // last live uuid list per kind, from effective_order()
+		this.save_failed = false;
+		this.data        = empty_blob();
 		this.load();
 	}
 
@@ -143,10 +144,10 @@ export default class ViewState {
 
 		this.data = normalize(raw, stats);
 
-		if (error) {
-			// keep the unreadable blob and say so: otherwise the next save
-			// silently replaces "my hidden scenes and dashboards vanished" with
-			// "there was never anything here"
+		if (error || stats.dropped) {
+			// whatever was rejected is gone from memory, and an unreadable blob
+			// was never in it: keep the raw value either way, or the next save
+			// erases the only evidence of what the operator lost
 			try {
 				if (raw_text !== null)
 					window.localStorage.setItem(BROKEN_KEY, raw_text);
@@ -154,19 +155,22 @@ export default class ViewState {
 				// storage is refusing every write; save() reports that separately
 			}
 
-			console.warn('ViewState: could not read the saved view' +
-				(raw_text !== null ? '; the raw value is kept in ' + BROKEN_KEY : ''), error);
-		} else if (stats.dropped) {
-			console.warn('ViewState: ignored ' + stats.dropped + ' malformed entries in the saved view');
+			if (error) {
+				console.warn('ViewState: could not read the saved view' +
+					(raw_text !== null ? '; the raw value is kept in ' + BROKEN_KEY : ''), error);
+			} else {
+				console.warn('ViewState: ignored ' + stats.dropped + ' malformed entries in the saved view' +
+					(raw_text !== null ? '; the raw value is kept in ' + BROKEN_KEY : ''));
+			}
 		}
 
 		return this.data;
 	}
 
 	/**
-	 * True while a write can be trusted. A write failure is reported once, then
-	 * the view bar says so for the rest of the session: a hidden row that never
-	 * persisted would otherwise look like it did.
+	 * True while a write can be trusted. A failure is reported once and cleared
+	 * by the next write that works, so a store that recovers stops claiming it
+	 * cannot save.
 	 */
 	can_save () {
 		return !this.future && !this.save_failed;
@@ -179,6 +183,7 @@ export default class ViewState {
 
 		try {
 			window.localStorage.setItem(KEY, JSON.stringify(this.data));
+			this.save_failed = false;
 			return true;
 		} catch (e) {
 			if (!this.save_failed) {
@@ -323,6 +328,41 @@ export default class ViewState {
 	hidden_list (kind) {
 		const entry = this.entry(kind);
 		return entry ? entry.hidden.slice() : [];
+	}
+
+	/**
+	 * A payload without uuids keys items by name, so a rename in OBS changes the
+	 * key. Every stored list has to follow it: a hidden item left under the old
+	 * key comes back into view, and the stale key can later hide whatever takes
+	 * that name. Dashboards hold keys of both kinds, so they move too.
+	 */
+	rename_key (kind, old_key, new_key) {
+		const entry = this.entry(kind);
+
+		if (!entry || !old_key || !new_key || old_key === new_key)
+			return;
+
+		const swap = (key) => (key === old_key ? new_key : key);
+		let changed = false;
+
+		['hidden', 'order'].forEach((field) => {
+			if (!entry[field].includes(old_key))
+				return;
+
+			entry[field] = entry[field].map(swap);
+			changed = true;
+		});
+
+		this.data.dashboards.forEach((dash) => {
+			if (!dash.items.includes(old_key))
+				return;
+
+			dash.items = dash.items.map(swap);
+			changed = true;
+		});
+
+		if (changed)
+			this.save();
 	}
 
 	// --- dashboards ---------------------------------------------------------
