@@ -60,10 +60,16 @@ function request_screenshot (sourceName, width) {
 	});
 }
 
+const ICON_GRIP    = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>';
+const ICON_EYE     = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const ICON_UP      = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>';
+const ICON_DOWN    = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+
 export default class SourceScene {
-	constructor (index, name) {
+	constructor (index, name, uuid) {
 		this.index       = index;
 		this.name        = name;
+		this.uuid        = uuid || null;
 		this.last_update = 9999999; // improbably high number
 		this.is_program  = wr.scene_program === name;
 		this.is_preview  = wr.scene_preview === name;
@@ -75,16 +81,34 @@ export default class SourceScene {
 		this.el          = h.NewElement('li', {
 			'id'       : 'li_scene_' + h.get_slug(name),
 			'className': 'scene',
+			'tabindex' : '0',
 			'events'   : {
 				'click'      : function (e) {  // left click
+					// a click that ends a reorder drag must not also switch the scene
+					if (e.target.closest('.wr-row-tools') || wr.is_row_click_suppressed())
+						return;
+
 					this.set_scene( e.shiftKey );
 				}.bind(this),
 				'contextmenu': function (e) {  // right click
+					if (e.target.closest('.wr-row-tools'))
+						return;
+
 					e.preventDefault();
 					this.set_scene(true);
+				}.bind(this),
+				'keydown'    : function (e) {
+					if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown'))
+						return;
+
+					e.preventDefault();
+					e.stopPropagation();
+					wr.move_row('scenes', this.uuid, e.key === 'ArrowUp' ? -1 : 1);
 				}.bind(this)
 			}
 		});
+
+		this.el.dataset.wrUuid = this.uuid || '';
 
 		this.div = h.NewElement('div', {
 			'innerHTML': this._get_index_string()
@@ -96,10 +120,79 @@ export default class SourceScene {
 
 		this.el.appendChild(this.div);
 		this.el.appendChild(this.label);
+		this.el.appendChild(this._build_tools(name));
 
 		// get initial state set up
 		this.el.style.aspectRatio = wr.aspect_ratio;
 		this.set_screenshot();
+	}
+
+	/**
+	 * The row's own controls. They sit outside the click-to-switch path: every
+	 * handler stops the event, so hiding or nudging a scene never also switches
+	 * to it.
+	 */
+	_build_tools (name) {
+		const tools = h.NewElement('div', {'className': 'wr-row-tools'});
+
+		this.grip_btn = h.NewElement('button', {
+			'type'      : 'button',
+			'className' : 'wr-row-tool wr-grip',
+			'aria-label': 'Reorder ' + name,
+			'title'     : 'Drag to reorder',
+			'innerHTML' : ICON_GRIP
+		});
+
+		this.up_btn = h.NewElement('button', {
+			'type'      : 'button',
+			'className' : 'wr-row-tool',
+			'aria-label': 'Move ' + name + ' up',
+			'title'     : 'Move up',
+			'innerHTML' : ICON_UP
+		});
+
+		this.down_btn = h.NewElement('button', {
+			'type'      : 'button',
+			'className' : 'wr-row-tool',
+			'aria-label': 'Move ' + name + ' down',
+			'title'     : 'Move down',
+			'innerHTML' : ICON_DOWN
+		});
+
+		this.hide_btn = h.NewElement('button', {
+			'type'        : 'button',
+			'className'   : 'wr-row-tool wr-hide',
+			'aria-label'  : 'Hide ' + name,
+			'aria-pressed': 'false',
+			'title'       : 'Hide from this view',
+			'innerHTML'   : ICON_EYE
+		});
+
+		this.grip_btn.addEventListener('pointerdown', (e) => {
+			wr.begin_row_drag(e, this.el, 'scenes', this.uuid);
+		}, false);
+
+		this.up_btn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			wr.move_row('scenes', this.uuid, -1);
+		}, false);
+
+		this.down_btn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			wr.move_row('scenes', this.uuid, 1);
+		}, false);
+
+		this.hide_btn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			wr.set_hidden('scenes', this.uuid, true);
+		}, false);
+
+		tools.appendChild(this.grip_btn);
+		tools.appendChild(this.up_btn);
+		tools.appendChild(this.down_btn);
+		tools.appendChild(this.hide_btn);
+
+		return tools;
 	}
 
 	update (tick) {
@@ -181,6 +274,14 @@ export default class SourceScene {
 		this.name = name;
 		this.label.innerHTML = name;
 		this.el.setAttribute('id', 'li_scene_' + h.get_slug(name) );
+
+		// controls announce the name too, or a rename leaves them lying about it
+		if (this.grip_btn) {
+			this.grip_btn.setAttribute('aria-label', 'Reorder ' + name);
+			this.up_btn.setAttribute('aria-label',   'Move ' + name + ' up');
+			this.down_btn.setAttribute('aria-label', 'Move ' + name + ' down');
+			this.hide_btn.setAttribute('aria-label', 'Hide ' + name);
+		}
 	}
 
 	async set_scene (forceCurrentScene) {

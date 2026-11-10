@@ -22,6 +22,23 @@ export function NewElement (_nodeType, _attributes) { // my own concoction
 	return el;
 }
 
+/**
+ * Put container's children into the given sequence, moving as few nodes as
+ * possible. Order is the DOM's, not a CSS `order` value, so the pointer sorter
+ * and the render path cannot disagree about what the sequence is.
+ */
+export function place_rows (container, elements) {
+	if (!container)
+		return;
+
+	for (let i = 0; i < elements.length; i++) {
+		const el = elements[i];
+
+		if (container.children[i] !== el)
+			container.insertBefore(el, container.children[i] || null);
+	}
+}
+
 export function get_slug (inString) {
 	// using replaceAll is apparently too new (Safari 13+, Chrome 85+), so use replace with regex //global modifier
 	return inString.toLowerCase().replace(/\s/g, '_').replace(/\+/g,'_').replace(/\//g,'_');

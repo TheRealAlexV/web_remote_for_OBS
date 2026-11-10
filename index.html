@@ -185,6 +185,20 @@
 			</ol>
 		</li>
 	</ul>
+	<div class="wr-view-bar" id="wr_view_bar">
+		<label class="wr-view-label" for="wr_dashboard">View</label>
+		<select id="wr_dashboard" class="wr-select" aria-label="Dashboard"></select>
+		<label class="wr-view-label" for="wr_sort">Sort</label>
+		<select id="wr_sort" class="wr-select" aria-label="Sort the lists">
+			<option value="">Sort…</option>
+			<option value="obs">OBS order</option>
+			<option value="az">A–Z</option>
+		</select>
+		<button type="button" id="wr_hidden_btn" class="wr-bar-button" aria-expanded="false" aria-controls="wr_hidden_panel">Hidden (0)</button>
+		<button type="button" id="wr_dash_btn" class="wr-bar-button" aria-expanded="false" aria-controls="wr_dash_panel">Dashboards</button>
+		<div id="wr_hidden_panel" class="wr-panel" hidden></div>
+		<div id="wr_dash_panel" class="wr-panel wr-panel-wide" hidden></div>
+	</div>
 	<div class="scene-box">
 		<ul id="scene_list" class="scene-list">
 		</ul>

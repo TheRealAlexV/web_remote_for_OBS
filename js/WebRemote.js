@@ -2,6 +2,7 @@ import * as h from './helper.js';
 import SourceScene from './SourceScene.js';
 import SourceAudio from './SourceAudio.js';
 import SourceText, {source_name as source_name_of} from './SourceText.js';
+import ViewState from './ViewState.js';
 
 export default class WebRemote {
 	constructor () {
@@ -15,6 +16,20 @@ export default class WebRemote {
 		this.input_kinds        = null;
 		this.input_kinds_generation = 0;
 		this.tick               = 0;
+
+		// curation: what this browser shows, keyed by OBS uuid. Names live in
+		// the maps below for display only; nothing here resolves an item by name.
+		this.view               = new ViewState();
+		this.raw_scenes         = [];      // payload, OBS order
+		this.scene_names        = new Map(); // uuid -> name
+		this.input_uuids        = new Map(); // name -> uuid
+		this.input_names        = new Map(); // uuid -> name
+		this.audio_uuids        = [];      // audio-capable, payload order
+		this.view_pruned        = false;
+		this.drag               = null;
+		this.drag_suppress_until = 0;
+		this.drag_move_bound    = this.on_row_drag_move.bind(this);
+		this.drag_end_bound     = this.on_row_drag_end.bind(this);
 
 		this.video_width        = 1920;
 		this.video_height       = 1080;
@@ -94,6 +109,9 @@ export default class WebRemote {
 
 		// this is more of a setup function than updater
 		this.update_source_list();
+
+		// the dashboard header: switcher, hidden items, sort and the editor
+		this.setup_view_bar();
 
 		// setup obs event handlers (v5 names; payloads carry the state directly)
 		wrc.on('StudioModeStateChanged',     this.on_studio_mode_switched.bind(this));
@@ -302,27 +320,43 @@ export default class WebRemote {
 
 		const data = result.data;
 
-		// Sort by sceneIndex so the 0-9 hotkeys keep the same order as in OBS.
-		// Skip hidden helper scenes (any with 'subscene' or 'hidden' in the name).
-		this.scene_list = data.scenes
-			.slice()
-			.sort((a, b) => a.sceneIndex - b.sceneIndex)
-			.filter(function (i) {
-				let include_scene = true;
-				if (i.sceneName.indexOf('subscene') != -1) {
-					include_scene = false;
-				}
-				if (i.sceneName.indexOf('hidden') != -1) {
-					include_scene = false;
-				}
-				return include_scene;
-			});
+		// Raw payload in OBS order (sceneIndex), which is what the 0-9 hotkeys
+		// and "Sort: OBS order" both mean. What gets rendered is a filtered,
+		// hand-ordered view of this.
+		this.raw_scenes = (data.scenes || []).slice()
+			.sort((a, b) => a.sceneIndex - b.sceneIndex);
 
-		this.update_scene_list();
+		this.scene_names = new Map();
+		this.raw_scenes.forEach((scene) => {
+			if (scene && scene.sceneUuid)
+				this.scene_names.set(scene.sceneUuid, scene.sceneName || '');
+		});
+
+		this.prune_view_once();
+		this.apply_scene_curation();
 
 		// program and preview state after a scene list change
 		this.on_scene_changed({ sceneName: data.currentProgramSceneName });
 		this.on_preview_changed({ sceneName: data.currentPreviewSceneName });
+	}
+
+	// the live sequence the store arranges, filtered down to what is visible
+	apply_scene_curation () {
+		const uuids = this.raw_scenes.map((scene) => scene.sceneUuid).filter(Boolean);
+		const order = this.view.effective_order('scenes', uuids);
+		const by_uuid = new Map();
+
+		this.raw_scenes.forEach((scene) => {
+			if (scene && scene.sceneUuid)
+				by_uuid.set(scene.sceneUuid, scene);
+		});
+
+		this.scene_list = order
+			.map((uuid) => by_uuid.get(uuid))
+			.filter((scene) => scene && this.view.visible('scenes', scene.sceneUuid));
+
+		this.update_scene_list();
+		this.render_view_bar();
 	}
 
 	update_scene_list () {
@@ -335,6 +369,7 @@ export default class WebRemote {
 
 		for (let i = 0; i < this.scene_list.length; i++) {
 			let name = this.scene_list[i].sceneName;
+			let uuid = this.scene_list[i].sceneUuid;
 
 			if (this.scenes[name]) {
 				// if found, update
@@ -342,13 +377,20 @@ export default class WebRemote {
 				this.scenes[name].update(this.tick);
 			} else {
 				// if not found, create element
-				let scene = new SourceScene(i, name);
+				let scene = new SourceScene(i, name, uuid);
 
 				this.scenes[name] = scene;
 				this.scenes[name].update(this.tick);
 				document.getElementById('scene_list').appendChild(scene.el);
 			}
 		}
+
+		// the sequence is the DOM's: move rows into their view order rather than
+		// leaning on a CSS order, so the sorter and the render agree
+		h.place_rows(document.getElementById('scene_list'),
+			this.scene_list.map((scene) => this.scenes[scene.sceneName])
+				.filter(Boolean)
+				.map((scene) => scene.el));
 
 		// remove scenes that are no longer current
 		for (let sname in this.scenes) {
@@ -472,6 +514,23 @@ export default class WebRemote {
 
 		const inputs = list.inputs || [];
 
+		// Identity for every input, audio or not: the text panes need the uuid to
+		// know whether their source is hidden or off-dashboard.
+		this.input_uuids = new Map();
+		this.input_names = new Map();
+
+		inputs.forEach((input) => {
+			if (!input || !input.inputName)
+				return;
+
+			this.input_uuids.set(input.inputName, input.inputUuid || null);
+
+			if (input.inputUuid)
+				this.input_names.set(input.inputUuid, input.inputName);
+		});
+
+		this.prune_view_once();
+
 		// second, get special inputs (sceneless ones)
 		let special_sources = [];
 
@@ -504,6 +563,12 @@ export default class WebRemote {
 
 		let current_audio_names = [];
 
+		// every audio-capable uuid in payload order, hidden ones included: the
+		// store needs the whole list so hiding an item cannot cost it its slot
+		const live_audio_uuids = [];
+
+		this.audio_uuids = [];
+
 		for (let i = 0; i < inputs.length; i++) {
 			const result = results[i];
 
@@ -523,7 +588,15 @@ export default class WebRemote {
 				name:   inputs[i].inputName,
 				type:   'input',
 				typeId: inputs[i].inputKind,
+				uuid:   inputs[i].inputUuid || null,
 			};
+
+			live_audio_uuids.push(s.uuid);
+			this.audio_uuids.push(s.uuid);
+
+			// hidden or off the active dashboard: no row at all, not a hidden one
+			if (!this.view.visible('audio', s.uuid))
+				continue;
 
 			// first, check if it already exists. If so, skip
 			let source_exists = false;
@@ -552,13 +625,31 @@ export default class WebRemote {
 				// remove and destroy element
 				a.on_source_destroyed();
 				document.getElementById('audio_list').removeChild( a.get_element() );
-				
+
 				// remove from audio list
 				let ix = this.audio_list.indexOf(a);
 				this.audio_list.splice(ix,1);
 			}
 		}
 
+		this.apply_audio_order(live_audio_uuids);
+		this.render_view_bar();
+	}
+
+	// hand-arranged order first, unseen inputs at the tail in payload order
+	apply_audio_order (live_uuids) {
+		const order   = this.view.effective_order('audio', live_uuids);
+		const by_uuid = new Map();
+
+		this.audio_list.forEach((row) => {
+			if (row.uuid)
+				by_uuid.set(row.uuid, row);
+		});
+
+		h.place_rows(document.getElementById('audio_list'),
+			order.map((uuid) => by_uuid.get(uuid))
+				.filter(Boolean)
+				.map((row) => row.get_element()));
 	}
 
 	update_source_list () {
@@ -643,6 +734,25 @@ export default class WebRemote {
 		if (!inItem)
 			return null;
 
+		const uuid = this.input_uuids.get(source_name_of(inItem));
+
+		// a hidden or off-dashboard input gets no pane and no auto-source stamp
+		if (uuid && !this.view.visible('audio', uuid)) {
+			this.set_source_row_visible(inItem, false);
+
+			if (inItem.wr_text_pane) {
+				inItem.wr_text_pane.destroy();
+				inItem.wr_text_pane.get_element().remove();
+				this.text_panes = this.text_panes.filter((pane) => pane !== inItem.wr_text_pane);
+				delete inItem.wr_text_pane;
+				inItem.classList.remove('wr-text-input-replaced');
+			}
+
+			return null;
+		}
+
+		this.set_source_row_visible(inItem, true);
+
 		if (!inItem.wr_text_pane) {
 			inItem.wr_text_pane = new SourceText(inItem, this);
 			inItem.classList.add('wr-text-input-replaced');
@@ -651,6 +761,15 @@ export default class WebRemote {
 		}
 
 		return inItem.wr_text_pane;
+	}
+
+	// a markup row is never deleted by a view filter, only hidden, so the
+	// operator's own index.html survives hiding and unhiding
+	set_source_row_visible (inEl, visible) {
+		const row = inEl && inEl.closest ? inEl.closest('li') : null;
+
+		if (row)
+			row.classList.toggle('wr-view-hidden', !visible);
 	}
 
 	/**
@@ -665,35 +784,65 @@ export default class WebRemote {
 		if (!kinds)
 			return;
 
-		// a source that is gone keeps no pane. An auto-created row is dropped
-		// whole; an opted-in row stays and reports the loss when it is opened.
+		// a source that is gone, no longer text, or filtered out of the view
+		// keeps no pane. An auto-created row is dropped whole; an opted-in row
+		// stays (hidden) and reports the loss when it is opened.
 		for (let i = this.text_panes.length - 1; i >= 0; i--) {
 			const pane = this.text_panes[i];
 			const el   = pane.input_el;
+			const kind = el ? (kinds.get(pane.name) || '') : '';
+			const uuid = el ? this.input_uuids.get(pane.name) : null;
+			const gone = !el ||
+				kind.indexOf('text_') !== 0 ||
+				(uuid && !this.view.visible('audio', uuid));
 
-			if (!el.wr_auto_source)
+			if (!gone)
 				continue;
 
-			const kind = kinds.get(pane.name) || '';
-
-			if (kind.indexOf('text_') === 0)
+			if (el && !el.wr_auto_source) {
+				pane.destroy();
+				pane.get_element().remove();
+				el.classList.remove('wr-text-input-replaced');
+				this.set_source_row_visible(el, false);
+				this.text_panes.splice(i, 1);
+				delete el.wr_text_pane;
 				continue;
+			}
 
 			pane.destroy();
 			pane.get_element().remove();
-			if (el.parentNode)
+
+			if (el && el.parentNode)
 				el.parentNode.remove();
+
 			this.text_panes.splice(i, 1);
-			delete el.wr_text_pane;
-			delete el.wr_auto_source;
+
+			if (el) {
+				delete el.wr_text_pane;
+				delete el.wr_auto_source;
+			}
 		}
 
 		kinds.forEach((kind, name) => {
 			if (!kind || kind.indexOf('text_') !== 0)
 				return;
 
-			const input = this.find_source_input(name) || this.create_source_input(name);
+			const uuid     = this.input_uuids.get(name);
+			const existing = this.find_source_input(name);
 
+			if (uuid && !this.view.visible('audio', uuid)) {
+				if (existing)
+					this.set_source_row_visible(existing, false);
+
+				return;
+			}
+
+			const input = existing || this.create_source_input(name);
+
+			if (!input)
+				return;
+
+			this.set_source_row_visible(input, true);
 			this.attach_text_pane(input);
 		});
 	}
@@ -701,6 +850,499 @@ export default class WebRemote {
 	// the kind map decides which panes exist, so a cleared map re-syncs them
 	refresh_text_panes () {
 		this.sync_text_panes().catch(this.log_async_error);
+	}
+
+	// --- view curation ------------------------------------------------------
+	//
+	// Three features, one store: hiding, a hand-arranged order, and dashboards
+	// that filter all three lists by uuid. Everything below is additive to the
+	// existing render paths; the lists themselves keep their old behaviour.
+
+	// dangling uuids are dropped once, after a poll that actually returned both
+	// lists, never mid-session on a single event
+	prune_view_once () {
+		if (this.view_pruned)
+			return;
+
+		if (!this.raw_scenes.length || !this.input_names.size)
+			return;
+
+		this.view.prune(
+			this.raw_scenes.map((scene) => scene.sceneUuid).filter(Boolean),
+			[...this.input_names.keys()]
+		);
+
+		this.view_pruned = true;
+	}
+
+	is_row_click_suppressed () {
+		return performance.now() < this.drag_suppress_until;
+	}
+
+	// anything that changes the view re-renders the lists it governs
+	refresh_curation () {
+		this.render_view_bar();
+
+		if (this.raw_scenes.length)
+			this.apply_scene_curation();
+
+		this.update_audio_list().catch(this.log_async_error);
+		this.refresh_text_panes();
+	}
+
+	set_hidden (kind, uuid, hidden) {
+		if (!uuid)
+			return;
+
+		this.view.set_hidden(kind, uuid, hidden);
+		this.refresh_curation();
+	}
+
+	// everything currently on screen, which is what a dashboard edits
+	visible_uuids () {
+		const out = [];
+
+		this.scene_list.forEach((scene) => {
+			if (scene.sceneUuid)
+				out.push(scene.sceneUuid);
+		});
+
+		this.audio_list.forEach((row) => {
+			if (row.uuid)
+				out.push(row.uuid);
+		});
+
+		return out;
+	}
+
+	sort_view (mode) {
+		const scenes = this.raw_scenes.map((scene) => ({ uuid: scene.sceneUuid, name: scene.sceneName || '' }));
+		const audio  = this.audio_uuids.map((uuid) => ({ uuid: uuid, name: this.input_names.get(uuid) || '' }));
+
+		[['scenes', scenes], ['audio', audio]].forEach(([kind, items]) => {
+			const seq = items
+				.filter((item) => item.uuid)
+				.sort((a, b) => mode === 'az' ? a.name.localeCompare(b.name) : 0)
+				.map((item) => item.uuid);
+
+			// one-shot: OBS order is the payload order, A-Z is by display name
+			this.view.sort_to(kind, seq);
+		});
+
+		this.refresh_curation();
+	}
+
+	// --- row order: pointer sorter plus the keyboard and button equivalents --
+
+	row_selector (kind) {
+		return kind === 'scenes' ? '#scene_list > .scene' : '#audio_list > .audio-item';
+	}
+
+	move_row (kind, uuid, delta) {
+		if (!uuid)
+			return;
+
+		const rows = [...document.querySelectorAll(this.row_selector(kind))]
+			.filter((el) => el.dataset.wrUuid);
+		const el = rows.find((row) => row.dataset.wrUuid === uuid);
+
+		if (!el)
+			return;
+
+		const target = rows[rows.indexOf(el) + delta];
+
+		if (!target)
+			return;
+
+		el.parentNode.insertBefore(el, delta < 0 ? target : target.nextSibling);
+		this.commit_row_order(kind);
+
+		if (el.focus)
+			el.focus();
+	}
+
+	// read the sequence off the DOM, but keep hidden items in the slots they
+	// held, so arranging the visible ones cannot evict a hidden one for good
+	commit_row_order (kind) {
+		const dom_seq = [...document.querySelectorAll(this.row_selector(kind))]
+			.map((el) => el.dataset.wrUuid)
+			.filter(Boolean);
+		const live = this.view.live_list(kind);
+
+		if (!live.length)
+			return;
+
+		const full = this.view.effective_order(kind, live);
+		let j = 0;
+
+		const merged = full.map((uuid) => dom_seq.includes(uuid) ? dom_seq[j++] : uuid);
+
+		this.view.sort_to(kind, merged);
+
+		if (kind === 'scenes')
+			this.apply_scene_curation();
+	}
+
+	// one code path for mouse, touch and pen: no HTML5 drag events
+	begin_row_drag (e, el, kind, uuid) {
+		if (!el || !uuid)
+			return;
+
+		if (e.pointerType === 'mouse' && e.button !== 0)
+			return;
+
+		e.preventDefault();
+		e.stopPropagation();
+
+		el.setPointerCapture(e.pointerId);
+
+		this.drag = {
+			el        : el,
+			kind      : kind,
+			uuid      : uuid,
+			pointer_id: e.pointerId,
+			x         : e.clientX,
+			y         : e.clientY,
+			moved     : false
+		};
+
+		el.classList.add('wr-row-dragging');
+		el.addEventListener('pointermove', this.drag_move_bound, false);
+		el.addEventListener('pointerup', this.drag_end_bound, false);
+		el.addEventListener('pointercancel', this.drag_end_bound, false);
+	}
+
+	on_row_drag_move (e) {
+		const drag = this.drag;
+
+		if (!drag || e.pointerId !== drag.pointer_id)
+			return;
+
+		if (!drag.moved) {
+			if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) <= 4)
+				return;
+
+			drag.moved = true;
+		}
+
+		e.preventDefault();
+
+		// the dragged row is pointer-events:none while it travels, so this hit
+		// test lands on the row underneath rather than on the row itself
+		const under  = document.elementFromPoint(e.clientX, e.clientY);
+		const target = under && under.closest ? under.closest(this.row_selector(drag.kind)) : null;
+
+		if (!target || target === drag.el || target.parentNode !== drag.el.parentNode)
+			return;
+
+		const rect   = target.getBoundingClientRect();
+		const before = e.clientY < rect.top + rect.height / 2 ||
+			(e.clientY < rect.bottom && e.clientX < rect.left + rect.width / 2);
+		const ref    = before ? target : target.nextSibling;
+
+		// comparing against the two no-op cases keeps a stationary pointer from
+		// thrashing the DOM on every move event
+		if (ref !== drag.el && ref !== drag.el.nextSibling)
+			drag.el.parentNode.insertBefore(drag.el, ref);
+	}
+
+	on_row_drag_end (e) {
+		const drag = this.drag;
+
+		if (!drag || e.pointerId !== drag.pointer_id)
+			return;
+
+		drag.el.removeEventListener('pointermove', this.drag_move_bound, false);
+		drag.el.removeEventListener('pointerup', this.drag_end_bound, false);
+		drag.el.removeEventListener('pointercancel', this.drag_end_bound, false);
+		drag.el.classList.remove('wr-row-dragging');
+
+		if (drag.el.hasPointerCapture && drag.el.hasPointerCapture(e.pointerId))
+			drag.el.releasePointerCapture(e.pointerId);
+
+		this.drag = null;
+
+		if (!drag.moved)
+			return;
+
+		// the click a finished drag leaves behind must not switch the scene
+		this.drag_suppress_until = performance.now() + 400;
+		this.commit_row_order(drag.kind);
+	}
+
+	// --- the dashboard header ----------------------------------------------
+
+	setup_view_bar () {
+		const select       = document.getElementById('wr_dashboard');
+		const hidden_btn   = document.getElementById('wr_hidden_btn');
+		const hidden_panel = document.getElementById('wr_hidden_panel');
+		const sort         = document.getElementById('wr_sort');
+		const dash_btn     = document.getElementById('wr_dash_btn');
+		const dash_panel   = document.getElementById('wr_dash_panel');
+
+		if (!select || !hidden_btn || !hidden_panel || !sort || !dash_btn || !dash_panel)
+			return;
+
+		this.viewbar = {
+			select: select,
+			hidden_btn: hidden_btn,
+			hidden_panel: hidden_panel,
+			sort: sort,
+			dash_btn: dash_btn,
+			dash_panel: dash_panel
+		};
+
+		this.viewbar_sig = '';
+
+		select.addEventListener('change', () => {
+			this.view.set_active_dashboard(select.value || null);
+			this.refresh_curation();
+		}, false);
+
+		sort.addEventListener('change', () => {
+			const mode = sort.value;
+			sort.value = '';
+
+			if (mode)
+				this.sort_view(mode);
+		}, false);
+
+		hidden_btn.addEventListener('click', () => {
+			this.toggle_view_panel('hidden');
+		}, false);
+
+		dash_btn.addEventListener('click', () => {
+			this.toggle_view_panel('dash');
+		}, false);
+
+		this.render_view_bar();
+	}
+
+	toggle_view_panel (which) {
+		const bar = this.viewbar;
+
+		if (!bar)
+			return;
+
+		const open_hidden = which === 'hidden' && bar.hidden_panel.hidden;
+		const open_dash   = which === 'dash' && bar.dash_panel.hidden;
+
+		bar.hidden_panel.hidden = !open_hidden;
+		bar.dash_panel.hidden   = !open_dash;
+
+		bar.hidden_btn.setAttribute('aria-expanded', open_hidden ? 'true' : 'false');
+		bar.dash_btn.setAttribute('aria-expanded', open_dash ? 'true' : 'false');
+
+		if (open_hidden)
+			this.render_hidden_panel();
+
+		if (open_dash)
+			this.render_dash_panel();
+	}
+
+	hidden_items () {
+		const out = [];
+
+		this.view.hidden_list('scenes').forEach((uuid) => {
+			if (this.scene_names.has(uuid))
+				out.push({ uuid: uuid, kind: 'scenes', name: this.scene_names.get(uuid) });
+		});
+
+		this.view.hidden_list('audio').forEach((uuid) => {
+			if (this.input_names.has(uuid))
+				out.push({ uuid: uuid, kind: 'audio', name: this.input_names.get(uuid) });
+		});
+
+		return out;
+	}
+
+	render_view_bar () {
+		const bar = this.viewbar;
+
+		if (!bar)
+			return;
+
+		const dashboards = this.view.dashboards();
+		const active     = this.view.data.activeDashboard || '';
+		const sig        = dashboards.map((d) => d.id + ':' + d.name).join('|') + '#' + active;
+
+		// rebuilding the options on every render would drop focus mid-keyboard
+		if (sig !== this.viewbar_sig) {
+			this.viewbar_sig = sig;
+
+			bar.select.textContent = '';
+			bar.select.appendChild(new Option('All', ''));
+
+			dashboards.forEach((dash) => {
+				bar.select.appendChild(new Option(dash.name, dash.id));
+			});
+
+			bar.select.value = active;
+		}
+
+		const hidden_count = this.hidden_items().length;
+
+		bar.hidden_btn.textContent = 'Hidden (' + hidden_count + ')';
+
+		if (!bar.hidden_panel.hidden)
+			this.render_hidden_panel();
+
+		// an audio event must not wipe a name half-typed in the editor
+		if (!bar.dash_panel.hidden && !bar.dash_panel.contains(document.activeElement))
+			this.render_dash_panel();
+	}
+
+	render_hidden_panel () {
+		const panel = this.viewbar && this.viewbar.hidden_panel;
+
+		if (!panel)
+			return;
+
+		panel.textContent = '';
+
+		const items = this.hidden_items();
+
+		if (!items.length) {
+			panel.appendChild(h.NewElement('p', {
+				'className': 'wr-panel-empty',
+				'innerHTML': 'Nothing is hidden.'
+			}));
+			return;
+		}
+
+		items.forEach((item) => {
+			const row = h.NewElement('div', {'className': 'wr-panel-row'});
+			const name = h.NewElement('span', {'className': 'wr-panel-name'});
+			const show = h.NewElement('button', {
+				'type'     : 'button',
+				'className': 'wr-panel-button',
+				'innerHTML': 'Show'
+			});
+
+			name.textContent = item.name + (item.kind === 'audio' ? ' (audio)' : '');
+
+			show.setAttribute('aria-label', 'Show ' + item.name);
+
+			show.addEventListener('click', () => {
+				this.set_hidden(item.kind, item.uuid, false);
+			}, false);
+
+			row.appendChild(name);
+			row.appendChild(show);
+			panel.appendChild(row);
+		});
+	}
+
+	render_dash_panel () {
+		const panel = this.viewbar && this.viewbar.dash_panel;
+
+		if (!panel)
+			return;
+
+		panel.textContent = '';
+
+		// create
+		const create_row = h.NewElement('div', {'className': 'wr-panel-row wr-panel-create'});
+		const name_input = h.NewElement('input', {
+			'type'       : 'text',
+			'className'  : 'wr-input',
+			'placeholder': 'New dashboard name',
+			'aria-label' : 'New dashboard name'
+		});
+
+		const create_btn = h.NewElement('button', {
+			'type'     : 'button',
+			'className': 'wr-panel-button',
+			'innerHTML': 'Create'
+		});
+
+		create_btn.addEventListener('click', () => {
+			if (name_input.value.trim() === '')
+				return;
+
+			this.view.create_dashboard(name_input.value);
+			name_input.value = '';
+			this.refresh_curation();
+		}, false);
+
+		name_input.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				create_btn.click();
+			}
+		}, false);
+
+		create_row.appendChild(name_input);
+		create_row.appendChild(create_btn);
+		panel.appendChild(create_row);
+
+		// existing dashboards, each editable in place
+		this.view.dashboards().forEach((dash) => {
+			const row = h.NewElement('div', {'className': 'wr-panel-row wr-dash-row'});
+			const name = h.NewElement('input', {
+				'type'     : 'text',
+				'className': 'wr-input',
+				'value'    : dash.name,
+				'aria-label': 'Name of dashboard ' + dash.name
+			});
+
+			name.addEventListener('change', () => {
+				this.view.rename_dashboard(dash.id, name.value);
+				this.refresh_curation();
+			}, false);
+
+			const add_btn = h.NewElement('button', {
+				'type'     : 'button',
+				'className': 'wr-panel-button',
+				'innerHTML': 'Add visible',
+				'title'    : 'Add every item currently shown to this dashboard'
+			});
+
+			add_btn.addEventListener('click', () => {
+				this.visible_uuids().forEach((uuid) => this.view.add_dashboard_item(dash.id, uuid));
+				this.refresh_curation();
+			}, false);
+
+			const remove_btn = h.NewElement('button', {
+				'type'     : 'button',
+				'className': 'wr-panel-button',
+				'innerHTML': 'Remove visible',
+				'title'    : 'Remove every item currently shown from this dashboard'
+			});
+
+			remove_btn.addEventListener('click', () => {
+				this.visible_uuids().forEach((uuid) => this.view.remove_dashboard_item(dash.id, uuid));
+				this.refresh_curation();
+			}, false);
+
+			const del_btn = h.NewElement('button', {
+				'type'     : 'button',
+				'className': 'wr-panel-button wr-panel-danger',
+				'innerHTML': 'Delete',
+				'aria-label': 'Delete dashboard ' + dash.name
+			});
+
+			del_btn.addEventListener('click', () => {
+				if (!window.confirm('Delete dashboard "' + dash.name + '"? Items return to All.'))
+					return;
+
+				this.view.delete_dashboard(dash.id);
+				this.refresh_curation();
+			}, false);
+
+			row.appendChild(name);
+			row.appendChild(add_btn);
+			row.appendChild(remove_btn);
+			row.appendChild(del_btn);
+			panel.appendChild(row);
+		});
+
+		if (!this.view.dashboards().length) {
+			panel.appendChild(h.NewElement('p', {
+				'className': 'wr-panel-empty',
+				'innerHTML': 'No dashboards yet. Create one, then add what is on screen.'
+			}));
+		}
 	}
 
 	// the input an operator already wrote for this source, if any: the panes and
@@ -809,8 +1451,16 @@ export default class WebRemote {
 		const kinds = new Map();
 
 		response.inputs.forEach((input) => {
-			if (input && input.inputName)
+			if (input && input.inputName) {
 				kinds.set(input.inputName, input.inputKind || '');
+
+				// the panes consult the view before they exist, so identity has
+				// to travel with the kind read and not wait for the audio poll
+				if (input.inputUuid) {
+					this.input_uuids.set(input.inputName, input.inputUuid);
+					this.input_names.set(input.inputUuid, input.inputName);
+				}
+			}
 		});
 
 		this.input_kinds = kinds;

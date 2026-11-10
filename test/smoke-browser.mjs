@@ -892,6 +892,95 @@ watchdog = setTimeout(() => {
 if (typeof watchdog.unref === 'function')
 	watchdog.unref();
 
+// --- view curation (read-only) ----------------------------------------------
+//
+// Seeds wr_view in the page's own storage, reloads, and checks that hiding, a manual order
+// and a dashboard all reach the DOM. Identity and names come from the rows this OBS just
+// rendered, never from a fixture, so the check follows whatever scene collection is loaded.
+
+async function runCurationChecks () {
+	const scenes = await evaluate(`[...document.querySelectorAll('#scene_list li.scene')].map(el => ({
+		uuid: el.dataset.wrUuid,
+		name: el.querySelector('label').textContent.trim(),
+	}))`);
+
+	if (scenes.length < 2 || scenes.some(scene => !scene.uuid))
+		throw new Error(`curation checks need at least two uuid-carrying scenes, got ${JSON.stringify(scenes.slice(0, 3))}`);
+
+	const audio_uuid = await evaluate(`(() => {
+		const row = [...document.querySelectorAll('#audio_list li.audio-item')].find(el => el.dataset.wrUuid);
+		return row ? row.dataset.wrUuid : null;
+	})()`);
+
+	const hidden     = scenes[1];
+	const only       = scenes[0];
+	const reversed   = scenes.map(scene => scene.uuid).reverse();
+	const first_name = scenes.find(scene => scene.uuid === reversed.find(uuid => uuid !== hidden.uuid)).name;
+	const hidden_lbl = 'Hidden (' + (audio_uuid ? 2 : 1) + ')';
+
+	const view = {
+		v: 1,
+		scenes: { hidden: [hidden.uuid], order: reversed },
+		audio:  { hidden: audio_uuid ? [audio_uuid] : [], order: [] },
+		dashboards: [ { id: 'smoke1', name: 'Smoke', items: [only.uuid] } ],
+		activeDashboard: null,
+	};
+
+	await evaluate(`localStorage.setItem('wr_view', ${JSON.stringify(JSON.stringify(view))})`);
+
+	await cdp.send('Page.reload', {});
+	await pass('the reloaded page reconnects', 'Boolean(window.wrc) && window.wrc.isConnected === true', 20000);
+	await pass('the reloaded scene list has rows', `document.querySelectorAll('#scene_list li.scene').length > 0`, 10000);
+
+	await pass('a hidden scene is not in the DOM',
+		`![...document.querySelectorAll('#scene_list li.scene label')].map(label => label.textContent.trim()).includes(${JSON.stringify(hidden.name)})`, 10000);
+	await pass('a hidden scene has no focusable row left behind',
+		`![...document.querySelectorAll('#scene_list li.scene')].some(el => el.dataset.wrUuid === ${JSON.stringify(hidden.uuid)})`, 10000);
+
+	await pass('the stored manual order is the rendered order',
+		`document.querySelectorAll('#scene_list li.scene label')[0].textContent.trim() === ${JSON.stringify(first_name)}`, 10000);
+
+	await pass('the header counts what is hidden',
+		`document.getElementById('wr_hidden_btn').textContent.trim() === ${JSON.stringify(hidden_lbl)}`, 10000);
+
+	if (audio_uuid) {
+		await pass('a hidden audio row is not in the DOM',
+			`![...document.querySelectorAll('#audio_list li.audio-item')].some(el => el.dataset.wrUuid === ${JSON.stringify(audio_uuid)})`, 10000);
+	}
+
+	await pass('the dashboard switcher lists the stored dashboard',
+		`[...document.querySelectorAll('#wr_dashboard option')].some(option => option.textContent.trim() === 'Smoke')`, 10000);
+
+	await evaluate(`(() => {
+		const select = document.getElementById('wr_dashboard');
+		select.value = 'smoke1';
+		select.dispatchEvent(new Event('change'));
+	})()`);
+
+	await pass('a dashboard narrows the scene list to its items',
+		`(() => {
+			const labels = [...document.querySelectorAll('#scene_list li.scene label')].map(label => label.textContent.trim());
+			return labels.length === 1 && labels[0] === ${JSON.stringify(only.name)};
+		})()`, 10000);
+
+	await pass('a dashboard narrows the audio list to its items',
+		`document.querySelectorAll('#audio_list li.audio-item').length === 0`, 10000);
+
+	await evaluate(`document.getElementById('wr_hidden_btn').click()`);
+	await pass('the hidden panel offers a way back',
+		`!document.getElementById('wr_hidden_panel').hidden &&
+			document.querySelectorAll('#wr_hidden_panel .wr-panel-button').length > 0`, 10000);
+
+	await evaluate(`document.querySelector('#wr_hidden_panel .wr-panel-button').click()`);
+	await pass('a hidden item can be brought back',
+		`document.getElementById('wr_hidden_btn').textContent.trim() !== ${JSON.stringify(hidden_lbl)}`, 10000);
+
+	// the run leaves no view state behind, so a later check starts clean
+	await evaluate(`localStorage.removeItem('wr_view')`);
+
+	await assertNoPageErrors();
+}
+
 try {
 	console.log(`node ${process.version}, chrome ${chromePath}`);
 
@@ -967,6 +1056,10 @@ try {
 
 	// e. nothing blew up along the way
 	await assertNoPageErrors();
+
+	// f. hiding, manual order and dashboards reach the rendered lists
+	if (!SMOKE_SCENE)
+		await runCurationChecks();
 
 	if (SMOKE_SCENE)
 		await runSceneSwitch(SMOKE_SCENE);

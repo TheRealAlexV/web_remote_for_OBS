@@ -452,6 +452,7 @@ button.preview {
 /* scenes */
 
 .scene {
+	position: relative;
 	display: flex;
 	flex-direction: column;
 	justify-content: flex-end;
@@ -1573,4 +1574,175 @@ ccu .filter-setting-label span {
 }
 .ccu-preset-wrapper > button:active {
 	background-color: #888;
+}
+/*--------------------------------------------------------------
+XX VIEW CURATION
+--------------------------------------------------------------*/
+
+/* a row the view filter hides: out of layout and out of the tab order */
+.wr-view-hidden {
+	display: none !important;
+}
+
+.wr-view-bar {
+	position: relative;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	background-color: #2c2c2c;
+	border-bottom: 1px solid #3a3a3a;
+	font-size: 0.8rem;
+	color: #ddd;
+}
+
+.wr-view-label {
+	color: #aaa;
+}
+
+.wr-select,
+.wr-input {
+	background-color: #1c1c1c;
+	color: #eee;
+	border: 1px solid #4a4a4a;
+	border-radius: 4px;
+	padding: 4px 7px;
+	min-height: 32px;
+	font: inherit;
+}
+
+.wr-select:focus-visible,
+.wr-input:focus-visible,
+.wr-bar-button:focus-visible,
+.wr-panel-button:focus-visible,
+.wr-row-tool:focus-visible {
+	outline: 2px solid #7cf;
+	outline-offset: 1px;
+}
+
+.wr-bar-button,
+.wr-panel-button {
+	background-color: #3a3a3a;
+	color: #eee;
+	border: 1px solid #555;
+	border-radius: 4px;
+	padding: 4px 10px;
+	min-height: 32px;
+	font: inherit;
+	cursor: pointer;
+	white-space: nowrap;
+}
+.wr-bar-button:hover,
+.wr-panel-button:hover {
+	background-color: #4a4a4a;
+}
+.wr-panel-danger:hover {
+	background-color: #8a2a2a;
+	border-color: #a33;
+}
+
+.wr-panel {
+	position: absolute;
+	top: calc(100% + 2px);
+	left: 10px;
+	z-index: 20;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 240px;
+	max-width: min(90vw, 430px);
+	max-height: 60vh;
+	overflow-y: auto;
+	background-color: #262626;
+	border: 1px solid #555;
+	border-radius: 6px;
+	padding: 8px;
+	box-shadow: 0 6px 18px rgba(0, 0, 0, .5);
+}
+.wr-panel[hidden] {
+	display: none;
+}
+.wr-panel-wide {
+	min-width: 320px;
+}
+
+.wr-panel-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.wr-panel-name {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.wr-panel-create .wr-input {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+.wr-panel-empty {
+	margin: 2px 0;
+	color: #999;
+}
+
+/* per-row curation controls */
+
+.wr-row-tools {
+	display: flex;
+	gap: 2px;
+	opacity: 0.6;
+}
+.scene:hover .wr-row-tools,
+.scene:focus-within .wr-row-tools,
+.audio-item:hover .wr-row-tools,
+.audio-item:focus-within .wr-row-tools {
+	opacity: 1;
+}
+
+.scene .wr-row-tools {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	z-index: 2;
+}
+.audio-item .wr-row-tools {
+	order: -1;
+	align-self: flex-end;
+	margin-bottom: 3px;
+}
+
+.wr-row-tool {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 30px;
+	height: 30px;
+	padding: 0;
+	background-color: rgba(20, 20, 20, .75);
+	color: #ddd;
+	border: 1px solid #555;
+	border-radius: 4px;
+	cursor: pointer;
+}
+.wr-row-tool:hover {
+	background-color: #444;
+	color: #fff;
+}
+.wr-row-tool.wr-grip {
+	cursor: grab;
+	touch-action: none;
+}
+.wr-row-dragging {
+	pointer-events: none;
+	opacity: .7;
+}
+
+@media (pointer: coarse) {
+	.wr-row-tool {
+		width: 44px;
+		height: 44px;
+	}
 }

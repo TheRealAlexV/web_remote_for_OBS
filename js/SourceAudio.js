@@ -13,6 +13,11 @@ const VOLUME_DEBOUNCE_MS = 80;
  * the work with no visible benefit.
  */
 const meter_sources = new Map(); // inputName -> SourceAudio
+
+const ICON_GRIP = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>';
+const ICON_EYE  = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const ICON_UP   = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>';
+const ICON_DOWN = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 let   meter_frame   = null;
 let   meter_bound   = false;
 
@@ -57,6 +62,7 @@ export default class SourceAudio {
 	constructor (inSource, is_sceneless = false) {
 		this.source        = inSource;
 		this.name          = inSource.name || inSource.inputName;
+		this.uuid          = inSource.uuid || null;
 		this.slug          = h.get_slug(this.name);
 		this.typeId        = inSource.typeId || inSource.inputKind || '';
 		this.volume        = 0;
@@ -142,6 +148,8 @@ export default class SourceAudio {
 		this.el.appendChild(this.name_el);
 		this.el.appendChild(this.settings_el);
 		this.el.appendChild(this.filters_list_el);
+		this.el.appendChild(this._build_tools());
+		this.el.dataset.wrUuid = this.uuid || '';
 
 		this.settings_el.appendChild(this.column_vu_el);
 		this.settings_el.appendChild(this.column_fader_el);
@@ -221,6 +229,74 @@ export default class SourceAudio {
 		this.on_evt('SourceFilterSettingsChanged',  this.on_filter_settings_changed);
 		this.on_evt('SourceFilterEnableStateChanged', this.on_filter_enable_state_changed);
 		this.on_evt('SceneItemEnableStateChanged',  this.on_scene_item_enable_state_changed);
+	}
+
+	/**
+	 * The row's curation controls. Audio rows have no click-to-activate on the
+	 * row itself, but the handlers still stop, so a control never doubles as a
+	 * fader or visibility tap.
+	 */
+	_build_tools () {
+		const tools = h.NewElement('div', {'className': 'wr-row-tools'});
+
+		this.grip_btn = h.NewElement('button', {
+			'type'      : 'button',
+			'className' : 'wr-row-tool wr-grip',
+			'aria-label': 'Reorder ' + this.name,
+			'title'     : 'Drag to reorder',
+			'innerHTML' : ICON_GRIP
+		});
+
+		this.up_btn = h.NewElement('button', {
+			'type'      : 'button',
+			'className' : 'wr-row-tool',
+			'aria-label': 'Move ' + this.name + ' up',
+			'title'     : 'Move up',
+			'innerHTML' : ICON_UP
+		});
+
+		this.down_btn = h.NewElement('button', {
+			'type'      : 'button',
+			'className' : 'wr-row-tool',
+			'aria-label': 'Move ' + this.name + ' down',
+			'title'     : 'Move down',
+			'innerHTML' : ICON_DOWN
+		});
+
+		this.hide_btn = h.NewElement('button', {
+			'type'        : 'button',
+			'className'   : 'wr-row-tool wr-hide',
+			'aria-label'  : 'Hide ' + this.name,
+			'aria-pressed': 'false',
+			'title'       : 'Hide from this view',
+			'innerHTML'   : ICON_EYE
+		});
+
+		this.grip_btn.addEventListener('pointerdown', (e) => {
+			wr.begin_row_drag(e, this.el, 'audio', this.uuid);
+		}, false);
+
+		this.up_btn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			wr.move_row('audio', this.uuid, -1);
+		}, false);
+
+		this.down_btn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			wr.move_row('audio', this.uuid, 1);
+		}, false);
+
+		this.hide_btn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			wr.set_hidden('audio', this.uuid, true);
+		}, false);
+
+		tools.appendChild(this.grip_btn);
+		tools.appendChild(this.up_btn);
+		tools.appendChild(this.down_btn);
+		tools.appendChild(this.hide_btn);
+
+		return tools;
 	}
 
 	get_element () {
