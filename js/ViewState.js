@@ -10,9 +10,12 @@
  * a bad value can never blank the remote.
  */
 
-const KEY       = 'wr_view';
-const VERSION   = 1;
-const KINDS     = ['scenes', 'audio'];
+const KEY        = 'wr_view';
+const BROKEN_KEY = 'wr_view.broken';
+const VERSION    = 1;
+const KINDS      = ['scenes', 'audio'];
+
+export const STORAGE_KEY = KEY;
 
 function empty_blob () {
 	return {
@@ -45,34 +48,61 @@ function clean_list (value) {
 	return out;
 }
 
-// keep only what the shape promises, so a hand-edited blob cannot crash a render
-function normalize (raw) {
+// keep only what the shape promises, so a hand-edited blob cannot crash a render.
+// `stats.dropped` counts what was thrown away, so a partial read can be reported
+// instead of looking like a deliberate empty view.
+function normalize (raw, stats) {
 	const blob = empty_blob();
+	const drop = () => { stats.dropped += 1; };
 
-	if (!raw || typeof raw !== 'object')
+	if (!raw || typeof raw !== 'object') {
+		if (raw)
+			drop();
+
 		return blob;
+	}
 
 	KINDS.forEach((kind) => {
 		const entry = raw[kind];
 
-		if (!entry || typeof entry !== 'object')
-			return;
+		if (!entry || typeof entry !== 'object') {
+			if (entry)
+				drop();
 
-		blob[kind].hidden = clean_list(entry.hidden);
-		blob[kind].order  = clean_list(entry.order);
+			return;
+		}
+
+		const hidden = clean_list(entry.hidden);
+		const order  = clean_list(entry.order);
+
+		stats.dropped += (Array.isArray(entry.hidden) ? entry.hidden.length : 0) - hidden.length;
+		stats.dropped += (Array.isArray(entry.order) ? entry.order.length : 0) - order.length;
+
+		blob[kind].hidden = hidden;
+		blob[kind].order  = order;
 	});
 
-	if (Array.isArray(raw.dashboards)) {
-		raw.dashboards.forEach((dash) => {
-			if (!dash || typeof dash !== 'object' || typeof dash.id !== 'string' || dash.id === '')
-				return;
+	if (raw.dashboards !== undefined) {
+		if (!Array.isArray(raw.dashboards)) {
+			drop();
+		} else {
+			raw.dashboards.forEach((dash) => {
+				if (!dash || typeof dash !== 'object' || typeof dash.id !== 'string' || dash.id === '') {
+					drop();
+					return;
+				}
 
-			blob.dashboards.push({
-				id   : dash.id,
-				name : typeof dash.name === 'string' && dash.name !== '' ? dash.name : 'Dashboard',
-				items: clean_list(dash.items),
+				const items = clean_list(dash.items);
+
+				stats.dropped += (Array.isArray(dash.items) ? dash.items.length : 0) - items.length;
+
+				blob.dashboards.push({
+					id   : dash.id,
+					name : typeof dash.name === 'string' && dash.name !== '' ? dash.name : 'Dashboard',
+					items: items,
+				});
 			});
-		});
+		}
 	}
 
 	if (typeof raw.activeDashboard === 'string' && blob.dashboards.some((d) => d.id === raw.activeDashboard))
@@ -89,25 +119,74 @@ export default class ViewState {
 	}
 
 	load () {
-		let raw = null;
+		let raw_text = null;
+		let raw      = null;
+		let error    = null;
 
 		try {
-			raw = JSON.parse(window.localStorage.getItem(KEY));
+			raw_text = window.localStorage.getItem(KEY);
+			raw      = raw_text ? JSON.parse(raw_text) : null;
 		} catch (e) {
-			raw = null;
+			error = e;
+			raw   = null;
 		}
 
-		this.data = normalize(raw);
+		// a store that never existed may take the one-time compatibility defaults;
+		// a store that exists, however sparse, is the operator's and is left alone
+		this.is_new = !raw_text;
+
+		// a blob written by a newer version is read best effort through the v1
+		// rules and never written back, so this tab cannot downgrade it
+		this.future = !!(raw && typeof raw.v === 'number' && raw.v > VERSION);
+
+		const stats = { dropped: 0 };
+
+		this.data = normalize(raw, stats);
+
+		if (error) {
+			// keep the unreadable blob and say so: otherwise the next save
+			// silently replaces "my hidden scenes and dashboards vanished" with
+			// "there was never anything here"
+			try {
+				if (raw_text !== null)
+					window.localStorage.setItem(BROKEN_KEY, raw_text);
+			} catch (e) {
+				// storage is refusing every write; save() reports that separately
+			}
+
+			console.warn('ViewState: could not read the saved view' +
+				(raw_text !== null ? '; the raw value is kept in ' + BROKEN_KEY : ''), error);
+		} else if (stats.dropped) {
+			console.warn('ViewState: ignored ' + stats.dropped + ' malformed entries in the saved view');
+		}
 
 		return this.data;
 	}
 
+	/**
+	 * True while a write can be trusted. A write failure is reported once, then
+	 * the view bar says so for the rest of the session: a hidden row that never
+	 * persisted would otherwise look like it did.
+	 */
+	can_save () {
+		return !this.future && !this.save_failed;
+	}
+
 	save () {
+		// a newer version owns the blob; this tab only renders from it
+		if (this.future)
+			return false;
+
 		try {
 			window.localStorage.setItem(KEY, JSON.stringify(this.data));
+			return true;
 		} catch (e) {
-			// private mode or a full quota: the session keeps working, it just
-			// will not remember, which is better than throwing into a render
+			if (!this.save_failed) {
+				this.save_failed = true;
+				console.warn('ViewState: changes cannot be saved in this browser', e);
+			}
+
+			return false;
 		}
 	}
 
@@ -186,11 +265,13 @@ export default class ViewState {
 		return (this._live[kind] || []).slice();
 	}
 
-	// one-shot write of a whole sequence: used by Sort and by a finished drag
+	// one-shot write of a whole sequence: used by Sort and by a finished drag.
+	// An empty sequence is never a caller's intent, and writing one would drop
+	// the arranged order for a list that still has items.
 	sort_to (kind, uuids) {
 		const entry = this.entry(kind);
 
-		if (!entry)
+		if (!entry || !Array.isArray(uuids) || !uuids.length)
 			return;
 
 		entry.order = clean_list(uuids);
@@ -314,27 +395,35 @@ export default class ViewState {
 	// --- startup cleanup ----------------------------------------------------
 
 	/**
-	 * Drop uuids OBS no longer reports. Called once, after the first poll that
-	 * actually returned scenes and inputs, so a slow connect cannot prune a
-	 * good list.
+	 * Drop keys OBS no longer reports. Only `hidden` and `order` are touched, and
+	 * only for a kind whose live key list is non-empty: "cannot identify items"
+	 * must mean "do not prune", never "prune everything". Dashboard items are
+	 * never pruned here — render already ignores keys that match nothing, and a
+	 * dashboard entry deleted on a hunch cannot be recovered.
 	 */
-	prune (sceneUuids, inputUuids) {
-		const liveScenes = new Set(clean_list(sceneUuids));
-		const liveInputs = new Set(clean_list(inputUuids));
-		const liveAll    = new Set([...liveScenes, ...liveInputs]);
+	prune (sceneKeys, inputKeys) {
+		const liveScenes = new Set(clean_list(sceneKeys));
+		const liveInputs = new Set(clean_list(inputKeys));
+		const removed    = { scenes: 0, audio: 0 };
 
 		KINDS.forEach((kind) => {
-			const live  = kind === 'scenes' ? liveScenes : liveInputs;
-			const entry = this.data[kind];
+			const live = kind === 'scenes' ? liveScenes : liveInputs;
 
-			entry.hidden = entry.hidden.filter((uuid) => live.has(uuid));
-			entry.order  = entry.order.filter((uuid) => live.has(uuid));
+			if (!live.size)
+				return;
+
+			const entry  = this.data[kind];
+			const hidden = entry.hidden.filter((key) => live.has(key));
+			const order  = entry.order.filter((key) => live.has(key));
+
+			removed[kind] += (entry.hidden.length - hidden.length) + (entry.order.length - order.length);
+			entry.hidden = hidden;
+			entry.order  = order;
 		});
 
-		this.data.dashboards.forEach((dash) => {
-			dash.items = dash.items.filter((uuid) => liveAll.has(uuid));
-		});
+		if (removed.scenes || removed.audio)
+			this.save();
 
-		this.save();
+		return removed;
 	}
 }

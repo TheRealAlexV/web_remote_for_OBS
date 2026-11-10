@@ -69,7 +69,7 @@ export default class SourceScene {
 	constructor (index, name, uuid) {
 		this.index       = index;
 		this.name        = name;
-		this.uuid        = uuid || null;
+		this.key        = uuid || null;
 		this.last_update = 9999999; // improbably high number
 		this.is_program  = wr.scene_program === name;
 		this.is_preview  = wr.scene_preview === name;
@@ -103,12 +103,12 @@ export default class SourceScene {
 
 					e.preventDefault();
 					e.stopPropagation();
-					wr.move_row('scenes', this.uuid, e.key === 'ArrowUp' ? -1 : 1);
+					wr.move_row('scenes', this.key, e.key === 'ArrowUp' ? -1 : 1);
 				}.bind(this)
 			}
 		});
 
-		this.el.dataset.wrUuid = this.uuid || '';
+		this.el.dataset.wrKey = this.key || '';
 
 		this.div = h.NewElement('div', {
 			'innerHTML': this._get_index_string()
@@ -169,22 +169,22 @@ export default class SourceScene {
 		});
 
 		this.grip_btn.addEventListener('pointerdown', (e) => {
-			wr.begin_row_drag(e, this.el, 'scenes', this.uuid);
+			wr.begin_row_drag(e, this.el, 'scenes', this.key);
 		}, false);
 
 		this.up_btn.addEventListener('click', (e) => {
 			e.stopPropagation();
-			wr.move_row('scenes', this.uuid, -1);
+			wr.move_row('scenes', this.key, -1);
 		}, false);
 
 		this.down_btn.addEventListener('click', (e) => {
 			e.stopPropagation();
-			wr.move_row('scenes', this.uuid, 1);
+			wr.move_row('scenes', this.key, 1);
 		}, false);
 
 		this.hide_btn.addEventListener('click', (e) => {
 			e.stopPropagation();
-			wr.set_hidden('scenes', this.uuid, true);
+			wr.set_hidden('scenes', this.key, true);
 		}, false);
 
 		tools.appendChild(this.grip_btn);

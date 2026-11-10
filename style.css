@@ -1746,3 +1746,34 @@ XX VIEW CURATION
 		height: 44px;
 	}
 }
+
+.wr-view-warning {
+	color: #f2b134;
+	font-size: 0.75rem;
+}
+.wr-panel-group {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	border-top: 1px solid #444;
+	padding-top: 6px;
+}
+.wr-panel-group-title {
+	margin: 0;
+	color: #bbb;
+	font-size: 0.75rem;
+	text-transform: uppercase;
+	letter-spacing: .04em;
+}
+.wr-panel-check {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 32px;
+	cursor: pointer;
+}
+.wr-checkbox {
+	width: 18px;
+	height: 18px;
+	accent-color: #48d;
+}

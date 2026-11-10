@@ -899,30 +899,59 @@ if (typeof watchdog.unref === 'function')
 // rendered, never from a fixture, so the check follows whatever scene collection is loaded.
 
 async function runCurationChecks () {
+	// this can run against an operator's live browser: whatever wr_view held
+	// before the check must come back, even when an assertion throws
+	const previous_view = await evaluate(`localStorage.getItem('wr_view')`);
+
+	try {
 	const scenes = await evaluate(`[...document.querySelectorAll('#scene_list li.scene')].map(el => ({
-		uuid: el.dataset.wrUuid,
+		key: el.dataset.wrKey,
 		name: el.querySelector('label').textContent.trim(),
 	}))`);
 
-	if (scenes.length < 2 || scenes.some(scene => !scene.uuid))
-		throw new Error(`curation checks need at least two uuid-carrying scenes, got ${JSON.stringify(scenes.slice(0, 3))}`);
+	if (scenes.length < 2 || scenes.some(scene => !scene.key))
+		throw new Error(`curation checks need at least two keyed scenes, got ${JSON.stringify(scenes.slice(0, 3))}`);
 
 	const audio_uuid = await evaluate(`(() => {
-		const row = [...document.querySelectorAll('#audio_list li.audio-item')].find(el => el.dataset.wrUuid);
-		return row ? row.dataset.wrUuid : null;
+		const row = [...document.querySelectorAll('#audio_list li.audio-item')].find(el => el.dataset.wrKey);
+		return row ? row.dataset.wrKey : null;
+	})()`);
+
+	// a text source, so a dashboard can be shown to hold one and its pane to survive
+	const text = await evaluate(`(() => {
+		const wr = window.wr;
+
+		if (!wr || !wr.input_kinds || !wr.input_uuids)
+			return null;
+
+		let found = null;
+
+		wr.input_kinds.forEach((kind, name) => {
+			if (found || typeof kind !== 'string' || kind.indexOf('text_') !== 0)
+				return;
+
+			const key = wr.input_uuids.get(name);
+
+			if (key)
+				found = { key: key, name: name };
+		});
+
+		return found;
 	})()`);
 
 	const hidden     = scenes[1];
 	const only       = scenes[0];
-	const reversed   = scenes.map(scene => scene.uuid).reverse();
-	const first_name = scenes.find(scene => scene.uuid === reversed.find(uuid => uuid !== hidden.uuid)).name;
+	const reversed   = scenes.map(scene => scene.key).reverse();
+	const first_name = scenes.find(scene => scene.key === reversed.find(key => key !== hidden.key)).name;
 	const hidden_lbl = 'Hidden (' + (audio_uuid ? 2 : 1) + ')';
+
+	const dashboard_items = [only.key].concat(text ? [text.key] : [], ['unknown:key']);
 
 	const view = {
 		v: 1,
-		scenes: { hidden: [hidden.uuid], order: reversed },
+		scenes: { hidden: [hidden.key], order: reversed },
 		audio:  { hidden: audio_uuid ? [audio_uuid] : [], order: [] },
-		dashboards: [ { id: 'smoke1', name: 'Smoke', items: [only.uuid] } ],
+		dashboards: [ { id: 'smoke1', name: 'Smoke', items: dashboard_items } ],
 		activeDashboard: null,
 	};
 
@@ -935,7 +964,7 @@ async function runCurationChecks () {
 	await pass('a hidden scene is not in the DOM',
 		`![...document.querySelectorAll('#scene_list li.scene label')].map(label => label.textContent.trim()).includes(${JSON.stringify(hidden.name)})`, 10000);
 	await pass('a hidden scene has no focusable row left behind',
-		`![...document.querySelectorAll('#scene_list li.scene')].some(el => el.dataset.wrUuid === ${JSON.stringify(hidden.uuid)})`, 10000);
+		`![...document.querySelectorAll('#scene_list li.scene')].some(el => el.dataset.wrKey === ${JSON.stringify(hidden.key)})`, 10000);
 
 	await pass('the stored manual order is the rendered order',
 		`document.querySelectorAll('#scene_list li.scene label')[0].textContent.trim() === ${JSON.stringify(first_name)}`, 10000);
@@ -945,7 +974,7 @@ async function runCurationChecks () {
 
 	if (audio_uuid) {
 		await pass('a hidden audio row is not in the DOM',
-			`![...document.querySelectorAll('#audio_list li.audio-item')].some(el => el.dataset.wrUuid === ${JSON.stringify(audio_uuid)})`, 10000);
+			`![...document.querySelectorAll('#audio_list li.audio-item')].some(el => el.dataset.wrKey === ${JSON.stringify(audio_uuid)})`, 10000);
 	}
 
 	await pass('the dashboard switcher lists the stored dashboard',
@@ -975,10 +1004,38 @@ async function runCurationChecks () {
 	await pass('a hidden item can be brought back',
 		`document.getElementById('wr_hidden_btn').textContent.trim() !== ${JSON.stringify(hidden_lbl)}`, 10000);
 
-	// the run leaves no view state behind, so a later check starts clean
-	await evaluate(`localStorage.removeItem('wr_view')`);
+	if (text) {
+		await pass('a text pane survives a dashboard switch',
+			`[...document.querySelectorAll('#source_list .source-text')].some(el => {
+				const row = el.closest('li');
+				return !row || !row.classList.contains('wr-view-hidden');
+			})`, 10000);
+	}
+
+	await pass('a dashboard keeps a key OBS does not report',
+		`(() => {
+			const blob = JSON.parse(localStorage.getItem('wr_view') || 'null');
+			return !!blob && blob.dashboards.some(d => d.items.includes('unknown:key'));
+		})()`, 10000);
 
 	await assertNoPageErrors();
+	} finally {
+		// restore, never delete: the documented mode runs against a live operator's
+		// browser, whose hidden list, order and dashboards were there first
+		await evaluate(`(() => {
+			const value = ${JSON.stringify(previous_view)};
+
+			if (value === null)
+				localStorage.removeItem('wr_view');
+			else
+				localStorage.setItem('wr_view', value);
+
+			// the page still holds the seeded copy in memory; re-read the restored
+			// value so a late poll cannot write the seeded state back over it
+			if (window.wr && window.wr.view)
+				window.wr.view.load();
+		})()`);
+	}
 }
 
 try {

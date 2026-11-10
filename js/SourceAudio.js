@@ -62,7 +62,7 @@ export default class SourceAudio {
 	constructor (inSource, is_sceneless = false) {
 		this.source        = inSource;
 		this.name          = inSource.name || inSource.inputName;
-		this.uuid          = inSource.uuid || null;
+		this.key          = inSource.key || null;
 		this.slug          = h.get_slug(this.name);
 		this.typeId        = inSource.typeId || inSource.inputKind || '';
 		this.volume        = 0;
@@ -149,7 +149,7 @@ export default class SourceAudio {
 		this.el.appendChild(this.settings_el);
 		this.el.appendChild(this.filters_list_el);
 		this.el.appendChild(this._build_tools());
-		this.el.dataset.wrUuid = this.uuid || '';
+		this.el.dataset.wrKey = this.key || '';
 
 		this.settings_el.appendChild(this.column_vu_el);
 		this.settings_el.appendChild(this.column_fader_el);
@@ -273,22 +273,22 @@ export default class SourceAudio {
 		});
 
 		this.grip_btn.addEventListener('pointerdown', (e) => {
-			wr.begin_row_drag(e, this.el, 'audio', this.uuid);
+			wr.begin_row_drag(e, this.el, 'audio', this.key);
 		}, false);
 
 		this.up_btn.addEventListener('click', (e) => {
 			e.stopPropagation();
-			wr.move_row('audio', this.uuid, -1);
+			wr.move_row('audio', this.key, -1);
 		}, false);
 
 		this.down_btn.addEventListener('click', (e) => {
 			e.stopPropagation();
-			wr.move_row('audio', this.uuid, 1);
+			wr.move_row('audio', this.key, 1);
 		}, false);
 
 		this.hide_btn.addEventListener('click', (e) => {
 			e.stopPropagation();
-			wr.set_hidden('audio', this.uuid, true);
+			wr.set_hidden('audio', this.key, true);
 		}, false);
 
 		tools.appendChild(this.grip_btn);

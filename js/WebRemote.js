@@ -2,7 +2,7 @@ import * as h from './helper.js';
 import SourceScene from './SourceScene.js';
 import SourceAudio from './SourceAudio.js';
 import SourceText, {source_name as source_name_of} from './SourceText.js';
-import ViewState from './ViewState.js';
+import ViewState, {STORAGE_KEY} from './ViewState.js';
 
 export default class WebRemote {
 	constructor () {
@@ -23,9 +23,11 @@ export default class WebRemote {
 		this.raw_scenes         = [];      // payload, OBS order
 		this.scene_names        = new Map(); // uuid -> name
 		this.input_uuids        = new Map(); // name -> uuid
-		this.input_names        = new Map(); // uuid -> name
-		this.audio_uuids        = [];      // audio-capable, payload order
+		this.input_names        = new Map(); // key -> name
+		this.audio_keys         = [];      // audio-capable, payload order
 		this.view_pruned        = false;
+		this.prune_signature    = null;
+		this.audio_refresh_pending = false;
 		this.drag               = null;
 		this.drag_suppress_until = 0;
 		this.drag_move_bound    = this.on_row_drag_move.bind(this);
@@ -245,6 +247,11 @@ export default class WebRemote {
 			this.update_outputs(results[6]);
 		}
 
+		// a view change that could not re-read the inputs leaves the audio DOM
+		// disagreeing with the store; retry here rather than on the next event
+		if (this.audio_refresh_pending && generation === this.connection_generation)
+			await this.update_audio_list();
+
 		// reset interval timeout, but only while this tick still belongs to the
 		// current connection
 		if (generation === this.connection_generation)
@@ -314,24 +321,46 @@ export default class WebRemote {
 			this.apply_scene_list({ ok: true, data: data });
 	}
 
+	/**
+	 * A stable key for any item. OBS 28's obs-websocket predates sceneUuid and
+	 * inputUuid, so the name is the fallback: a rename then breaks the link, but
+	 * an item is never silently dropped from every list. Null means unkeyable,
+	 * which callers treat as "visible, and leave the order alone".
+	 */
+	scene_key (scene) {
+		if (!scene)
+			return null;
+
+		return scene.sceneUuid || (scene.sceneName ? 'name:' + scene.sceneName : null);
+	}
+
+	input_key (input) {
+		if (!input)
+			return null;
+
+		return input.inputUuid || (input.inputName ? 'name:' + input.inputName : null);
+	}
+
 	apply_scene_list (result) {
 		if (!result || !result.ok)
 			return;
 
 		const data = result.data;
 
-		// Raw payload in OBS order (sceneIndex), which is what the 0-9 hotkeys
-		// and "Sort: OBS order" both mean. What gets rendered is a filtered,
-		// hand-ordered view of this.
+		// Raw payload in OBS order (sceneIndex), which is what "Sort: OBS order"
+		// means. What gets rendered is a filtered, hand-ordered view of this.
 		this.raw_scenes = (data.scenes || []).slice()
 			.sort((a, b) => a.sceneIndex - b.sceneIndex);
 
 		this.scene_names = new Map();
 		this.raw_scenes.forEach((scene) => {
-			if (scene && scene.sceneUuid)
-				this.scene_names.set(scene.sceneUuid, scene.sceneName || '');
+			const key = this.scene_key(scene);
+
+			if (key)
+				this.scene_names.set(key, scene.sceneName || '');
 		});
 
+		this.seed_legacy_hidden();
 		this.prune_view_once();
 		this.apply_scene_curation();
 
@@ -342,18 +371,24 @@ export default class WebRemote {
 
 	// the live sequence the store arranges, filtered down to what is visible
 	apply_scene_curation () {
-		const uuids = this.raw_scenes.map((scene) => scene.sceneUuid).filter(Boolean);
-		const order = this.view.effective_order('scenes', uuids);
-		const by_uuid = new Map();
+		const keyed = this.raw_scenes.map((scene) => ({ scene: scene, key: this.scene_key(scene) }));
 
-		this.raw_scenes.forEach((scene) => {
-			if (scene && scene.sceneUuid)
-				by_uuid.set(scene.sceneUuid, scene);
+		// one unkeyable scene means the list cannot be arranged at all: keep OBS
+		// order instead of handing the store a short or empty sequence
+		const order = keyed.every((entry) => entry.key)
+			? this.view.effective_order('scenes', keyed.map((entry) => entry.key))
+			: keyed.map((entry) => entry.key).filter(Boolean);
+
+		const by_key = new Map();
+
+		keyed.forEach((entry) => {
+			if (entry.key)
+				by_key.set(entry.key, entry.scene);
 		});
 
 		this.scene_list = order
-			.map((uuid) => by_uuid.get(uuid))
-			.filter((scene) => scene && this.view.visible('scenes', scene.sceneUuid));
+			.map((key) => by_key.get(key))
+			.filter((scene) => scene && this.view.visible('scenes', this.scene_key(scene)));
 
 		this.update_scene_list();
 		this.render_view_bar();
@@ -369,15 +404,17 @@ export default class WebRemote {
 
 		for (let i = 0; i < this.scene_list.length; i++) {
 			let name = this.scene_list[i].sceneName;
-			let uuid = this.scene_list[i].sceneUuid;
+			let key  = this.scene_key(this.scene_list[i]);
 
 			if (this.scenes[name]) {
-				// if found, update
+				// the printed number is the on-screen position, not sceneIndex:
+				// it follows the curated order on purpose, so a reorder renumbers
+				// the hotkey hints with the tiles
 				this.scenes[name].change_index(i);
 				this.scenes[name].update(this.tick);
 			} else {
 				// if not found, create element
-				let scene = new SourceScene(i, name, uuid);
+				let scene = new SourceScene(i, name, key);
 
 				this.scenes[name] = scene;
 				this.scenes[name].update(this.tick);
@@ -452,6 +489,20 @@ export default class WebRemote {
 		if (scene) {
 			scene.change_name(new_name);
 
+			// uuid-keyed scenes keep their key through a rename; a name-keyed
+			// one (OBS 28) follows the name so the hidden list stops lying
+			const old_key = 'name:' + old_name;
+
+			if (this.scene_names.has(old_key)) {
+				this.scene_names.delete(old_key);
+				this.scene_names.set('name:' + new_name, new_name);
+			}
+
+			if (scene.el && scene.el.dataset.wrKey === old_key) {
+				scene.key = 'name:' + new_name;
+				scene.el.dataset.wrKey = scene.key;
+			}
+
 			// this.scenes is keyed by name, so move the entry with the tile
 			delete this.scenes[old_name];
 			this.scenes[new_name] = scene;
@@ -509,24 +560,31 @@ export default class WebRemote {
 	async update_audio_list () {
 		const list = await wrc.safeCall('GetInputList');
 
-		if (!list)
+		if (!list) {
+			// the store may already say a row is hidden while the DOM still shows
+			// it: say so once and let the interval tick retry
+			this.audio_refresh_pending = true;
+			console.warn('WebRemote: audio list not refreshed; the view is stale until the next poll');
 			return;
+		}
+
+		this.audio_refresh_pending = false;
 
 		const inputs = list.inputs || [];
 
-		// Identity for every input, audio or not: the text panes need the uuid to
+		// Identity for every input, audio or not: the text panes need the key to
 		// know whether their source is hidden or off-dashboard.
 		this.input_uuids = new Map();
 		this.input_names = new Map();
 
 		inputs.forEach((input) => {
-			if (!input || !input.inputName)
+			const key = this.input_key(input);
+
+			if (!key)
 				return;
 
-			this.input_uuids.set(input.inputName, input.inputUuid || null);
-
-			if (input.inputUuid)
-				this.input_names.set(input.inputUuid, input.inputName);
+			this.input_uuids.set(input.inputName, key);
+			this.input_names.set(key, input.inputName || '');
 		});
 
 		this.prune_view_once();
@@ -549,25 +607,39 @@ export default class WebRemote {
 		let results = [];
 
 		if (inputs.length) {
-			try {
-				results = await wrc.batch(inputs.map(function (input) {
+			const request_tracks = function () {
+				return wrc.batch(inputs.map(function (input) {
 					return {
 						requestType: 'GetInputAudioTracks',
 						requestData: { inputName: input.inputName },
 					};
 				}));
+			};
+
+			try {
+				results = await request_tracks();
 			} catch (e) {
-				results = [];
+				// one retry: a dropped batch is usually transport, not a refusal.
+				// If it fails again every input is kept on the audio path, which
+				// over-lists non-audio sources rather than losing an audio one.
+				console.warn('WebRemote: GetInputAudioTracks batch failed, retrying once', e);
+
+				try {
+					results = await request_tracks();
+				} catch (e2) {
+					console.warn('WebRemote: GetInputAudioTracks batch failed twice; every input is treated as audio', e2);
+					results = [];
+				}
 			}
 		}
 
 		let current_audio_names = [];
 
-		// every audio-capable uuid in payload order, hidden ones included: the
+		// every audio-capable key in payload order, hidden ones included: the
 		// store needs the whole list so hiding an item cannot cost it its slot
-		const live_audio_uuids = [];
+		const live_audio_keys = [];
 
-		this.audio_uuids = [];
+		this.audio_keys = [];
 
 		for (let i = 0; i < inputs.length; i++) {
 			const result = results[i];
@@ -588,14 +660,14 @@ export default class WebRemote {
 				name:   inputs[i].inputName,
 				type:   'input',
 				typeId: inputs[i].inputKind,
-				uuid:   inputs[i].inputUuid || null,
+				key:    this.input_key(inputs[i]),
 			};
 
-			live_audio_uuids.push(s.uuid);
-			this.audio_uuids.push(s.uuid);
+			live_audio_keys.push(s.key);
+			this.audio_keys.push(s.key);
 
 			// hidden or off the active dashboard: no row at all, not a hidden one
-			if (!this.view.visible('audio', s.uuid))
+			if (!this.view.visible('audio', s.key))
 				continue;
 
 			// first, check if it already exists. If so, skip
@@ -632,22 +704,29 @@ export default class WebRemote {
 			}
 		}
 
-		this.apply_audio_order(live_audio_uuids);
+		this.apply_audio_order(live_audio_keys);
 		this.render_view_bar();
 	}
 
 	// hand-arranged order first, unseen inputs at the tail in payload order
-	apply_audio_order (live_uuids) {
-		const order   = this.view.effective_order('audio', live_uuids);
-		const by_uuid = new Map();
+	apply_audio_order (live_keys) {
+		// one unkeyable input means the list cannot be arranged at all: leave the
+		// rows in payload order rather than dropping it from the sequence
+		if (live_keys.some((key) => !key)) {
+			h.place_rows(document.getElementById('audio_list'), this.audio_list.map((row) => row.get_element()));
+			return;
+		}
+
+		const order   = this.view.effective_order('audio', live_keys);
+		const by_key  = new Map();
 
 		this.audio_list.forEach((row) => {
-			if (row.uuid)
-				by_uuid.set(row.uuid, row);
+			if (row.key)
+				by_key.set(row.key, row);
 		});
 
 		h.place_rows(document.getElementById('audio_list'),
-			order.map((uuid) => by_uuid.get(uuid))
+			order.map((key) => by_key.get(key))
 				.filter(Boolean)
 				.map((row) => row.get_element()));
 	}
@@ -858,8 +937,9 @@ export default class WebRemote {
 	// that filter all three lists by uuid. Everything below is additive to the
 	// existing render paths; the lists themselves keep their old behaviour.
 
-	// dangling uuids are dropped once, after a poll that actually returned both
-	// lists, never mid-session on a single event
+	// dangling keys are dropped once, and only after two consecutive polls agree:
+	// a successful GetSceneList during a scene-collection switch is not proof the
+	// collection is complete, so one partial list must not erase the arrangement
 	prune_view_once () {
 		if (this.view_pruned)
 			return;
@@ -867,12 +947,45 @@ export default class WebRemote {
 		if (!this.raw_scenes.length || !this.input_names.size)
 			return;
 
-		this.view.prune(
-			this.raw_scenes.map((scene) => scene.sceneUuid).filter(Boolean),
-			[...this.input_names.keys()]
-		);
+		const scene_keys = this.raw_scenes.map((scene) => this.scene_key(scene)).filter(Boolean);
+		const input_keys = [...this.input_names.keys()];
+		const signature  = scene_keys.slice().sort().join('|') +
+			'#' + input_keys.slice().sort().join('|');
+
+		if (signature !== this.prune_signature) {
+			this.prune_signature = signature;
+			return;
+		}
+
+		const removed = this.view.prune(scene_keys, input_keys);
+
+		if (removed.scenes || removed.audio)
+			console.log('WebRemote: pruned ' + removed.scenes + ' stale scene keys and ' +
+				removed.audio + ' stale input keys from the saved view');
 
 		this.view_pruned = true;
+	}
+
+	/**
+	 * The old name-substring auto-hide, kept as a one-time default for a browser
+	 * that has never curated anything. Zero matches on this rig; it exists so
+	 * existing users do not suddenly see their helper scenes.
+	 */
+	seed_legacy_hidden () {
+		if (!this.view.is_new || this.view_seeded)
+			return;
+
+		this.view_seeded = true;
+
+		this.raw_scenes.forEach((scene) => {
+			if (!/subscene|hidden/i.test(scene.sceneName || ''))
+				return;
+
+			const key = this.scene_key(scene);
+
+			if (key)
+				this.view.set_hidden('scenes', key, true);
+		});
 	}
 
 	is_row_click_suppressed () {
@@ -890,43 +1003,106 @@ export default class WebRemote {
 		this.refresh_text_panes();
 	}
 
-	set_hidden (kind, uuid, hidden) {
-		if (!uuid)
+	set_hidden (kind, key, hidden) {
+		if (!key)
 			return;
 
-		this.view.set_hidden(kind, uuid, hidden);
+		// hiding pulls the focused row out of the DOM: remember its neighbours so
+		// the eye control that replaces it can take focus back
+		const rows     = [...document.querySelectorAll(this.row_selector(kind))];
+		const at       = rows.findIndex((el) => el.dataset.wrKey === key);
+		const next_key = at >= 0 && rows[at + 1] ? rows[at + 1].dataset.wrKey : null;
+		const prev_key = at > 0 ? rows[at - 1].dataset.wrKey : null;
+		const in_panel = !!(document.activeElement && document.activeElement.closest('.wr-panel'));
+
+		this.view.set_hidden(kind, key, hidden);
 		this.refresh_curation();
+
+		// a button inside the hidden panel restores its own focus after the
+		// rebuild; do not yank it back out to a row
+		if (!in_panel)
+			this.restore_row_focus(kind, next_key, prev_key);
+	}
+
+	// focus the eye of the row now in the removed row's place, else the previous
+	// row's, else the header control that can bring the item back
+	restore_row_focus (kind, next_key, prev_key) {
+		const rows = [...document.querySelectorAll(this.row_selector(kind))];
+		const row  = rows.find((el) => el.dataset.wrKey === next_key) ||
+			rows.slice().reverse().find((el) => el.dataset.wrKey === prev_key) ||
+			rows[0];
+		const btn  = row ? row.querySelector('.wr-hide') : null;
+		const fallback = this.viewbar && this.viewbar.hidden_btn;
+
+		if (btn)
+			btn.focus();
+		else if (fallback)
+			fallback.focus();
 	}
 
 	// everything currently on screen, which is what a dashboard edits
-	visible_uuids () {
+	visible_keys () {
 		const out = [];
 
 		this.scene_list.forEach((scene) => {
-			if (scene.sceneUuid)
-				out.push(scene.sceneUuid);
+			const key = this.scene_key(scene);
+
+			if (key)
+				out.push(key);
 		});
 
 		this.audio_list.forEach((row) => {
-			if (row.uuid)
-				out.push(row.uuid);
+			if (row.key)
+				out.push(row.key);
+		});
+
+		// panes are inputs too: a dashboard that cannot hold a text key blacks
+		// every pane out, so the ones actually on screen count as visible
+		this.text_panes.forEach((pane) => {
+			const key = this.input_uuids.get(pane.name);
+			const row = pane.input_el && pane.input_el.closest('li');
+
+			if (key && !(row && row.classList.contains('wr-view-hidden')))
+				out.push(key);
+		});
+
+		return out;
+	}
+
+	// the text sources the app already derives panes from, for the dashboard editor
+	text_sources () {
+		const out = [];
+
+		if (!this.input_kinds)
+			return out;
+
+		this.input_kinds.forEach((kind, name) => {
+			if (!kind || kind.indexOf('text_') !== 0)
+				return;
+
+			const key = this.input_uuids.get(name);
+
+			if (key)
+				out.push({ key: key, name: name });
 		});
 
 		return out;
 	}
 
 	sort_view (mode) {
-		const scenes = this.raw_scenes.map((scene) => ({ uuid: scene.sceneUuid, name: scene.sceneName || '' }));
-		const audio  = this.audio_uuids.map((uuid) => ({ uuid: uuid, name: this.input_names.get(uuid) || '' }));
+		const scenes = this.raw_scenes.map((scene) => ({ key: this.scene_key(scene), name: scene.sceneName || '' }));
+		const audio  = this.audio_keys.map((key) => ({ key: key, name: this.input_names.get(key) || '' }));
 
 		[['scenes', scenes], ['audio', audio]].forEach(([kind, items]) => {
 			const seq = items
-				.filter((item) => item.uuid)
+				.filter((item) => item.key)
 				.sort((a, b) => mode === 'az' ? a.name.localeCompare(b.name) : 0)
-				.map((item) => item.uuid);
+				.map((item) => item.key);
 
-			// one-shot: OBS order is the payload order, A-Z is by display name
-			this.view.sort_to(kind, seq);
+			// one-shot: OBS order is the payload order, A-Z is by display name.
+			// An empty sequence is a read that saw nothing, never a sort request
+			if (seq.length)
+				this.view.sort_to(kind, seq);
 		});
 
 		this.refresh_curation();
@@ -938,13 +1114,13 @@ export default class WebRemote {
 		return kind === 'scenes' ? '#scene_list > .scene' : '#audio_list > .audio-item';
 	}
 
-	move_row (kind, uuid, delta) {
-		if (!uuid)
+	move_row (kind, key, delta) {
+		if (!key)
 			return;
 
 		const rows = [...document.querySelectorAll(this.row_selector(kind))]
-			.filter((el) => el.dataset.wrUuid);
-		const el = rows.find((row) => row.dataset.wrUuid === uuid);
+			.filter((el) => el.dataset.wrKey);
+		const el = rows.find((row) => row.dataset.wrKey === key);
 
 		if (!el)
 			return;
@@ -965,17 +1141,17 @@ export default class WebRemote {
 	// held, so arranging the visible ones cannot evict a hidden one for good
 	commit_row_order (kind) {
 		const dom_seq = [...document.querySelectorAll(this.row_selector(kind))]
-			.map((el) => el.dataset.wrUuid)
+			.map((el) => el.dataset.wrKey)
 			.filter(Boolean);
 		const live = this.view.live_list(kind);
 
-		if (!live.length)
+		if (!live.length || !dom_seq.length)
 			return;
 
 		const full = this.view.effective_order(kind, live);
 		let j = 0;
 
-		const merged = full.map((uuid) => dom_seq.includes(uuid) ? dom_seq[j++] : uuid);
+		const merged = full.map((key) => dom_seq.includes(key) ? dom_seq[j++] : key);
 
 		this.view.sort_to(kind, merged);
 
@@ -984,8 +1160,8 @@ export default class WebRemote {
 	}
 
 	// one code path for mouse, touch and pen: no HTML5 drag events
-	begin_row_drag (e, el, kind, uuid) {
-		if (!el || !uuid)
+	begin_row_drag (e, el, kind, key) {
+		if (!el || !key)
 			return;
 
 		if (e.pointerType === 'mouse' && e.button !== 0)
@@ -996,10 +1172,14 @@ export default class WebRemote {
 
 		el.setPointerCapture(e.pointerId);
 
+		// a press that never moves still ends in a click; window it from the
+		// press as well as the release, so the row cannot switch scene
+		this.drag_suppress_until = performance.now() + 400;
+
 		this.drag = {
 			el        : el,
 			kind      : kind,
-			uuid      : uuid,
+			key       : key,
 			pointer_id: e.pointerId,
 			x         : e.clientX,
 			y         : e.clientY,
@@ -1062,11 +1242,13 @@ export default class WebRemote {
 
 		this.drag = null;
 
+		// whichever way the press ended, the click it leaves behind is not a
+		// scene switch; the capture-phase guard in setup_view_bar swallows it
+		this.drag_suppress_until = performance.now() + 400;
+
 		if (!drag.moved)
 			return;
 
-		// the click a finished drag leaves behind must not switch the scene
-		this.drag_suppress_until = performance.now() + 400;
 		this.commit_row_order(drag.kind);
 	}
 
@@ -1089,10 +1271,30 @@ export default class WebRemote {
 			hidden_panel: hidden_panel,
 			sort: sort,
 			dash_btn: dash_btn,
-			dash_panel: dash_panel
+			dash_panel: dash_panel,
+			save_warning: document.getElementById('wr_save_warning')
 		};
 
 		this.viewbar_sig = '';
+
+		// A press on a grip ends in a click that can land outside the row's
+		// tools; swallow it in the capture phase rather than trusting the target
+		document.addEventListener('click', (e) => {
+			if (this.is_row_click_suppressed())
+				e.stopPropagation();
+		}, true);
+
+		// another tab (a phone next to a desktop) wrote the view: adopt it
+		// rather than overwriting it with this tab's stale copy
+		window.addEventListener('storage', (e) => {
+			if (e.key !== null && e.key !== STORAGE_KEY)
+				return;
+
+			this.view.load();
+			this.view_pruned    = false;
+			this.prune_signature = null;
+			this.refresh_curation();
+		}, false);
 
 		select.addEventListener('change', () => {
 			this.view.set_active_dashboard(select.value || null);
@@ -1143,14 +1345,14 @@ export default class WebRemote {
 	hidden_items () {
 		const out = [];
 
-		this.view.hidden_list('scenes').forEach((uuid) => {
-			if (this.scene_names.has(uuid))
-				out.push({ uuid: uuid, kind: 'scenes', name: this.scene_names.get(uuid) });
+		this.view.hidden_list('scenes').forEach((key) => {
+			if (this.scene_names.has(key))
+				out.push({ key: key, kind: 'scenes', name: this.scene_names.get(key) });
 		});
 
-		this.view.hidden_list('audio').forEach((uuid) => {
-			if (this.input_names.has(uuid))
-				out.push({ uuid: uuid, kind: 'audio', name: this.input_names.get(uuid) });
+		this.view.hidden_list('audio').forEach((key) => {
+			if (this.input_names.has(key))
+				out.push({ key: key, kind: 'audio', name: this.input_names.get(key) });
 		});
 
 		return out;
@@ -1184,6 +1386,10 @@ export default class WebRemote {
 
 		bar.hidden_btn.textContent = 'Hidden (' + hidden_count + ')';
 
+		// a write that failed leaves the screen lying about what was kept
+		if (bar.save_warning)
+			bar.save_warning.hidden = this.view.can_save();
+
 		if (!bar.hidden_panel.hidden)
 			this.render_hidden_panel();
 
@@ -1192,15 +1398,21 @@ export default class WebRemote {
 			this.render_dash_panel();
 	}
 
-	render_hidden_panel () {
+	render_hidden_panel (force) {
 		const panel = this.viewbar && this.viewbar.hidden_panel;
 
 		if (!panel)
 			return;
 
-		panel.textContent = '';
-
 		const items = this.hidden_items();
+		const sig   = items.map((item) => item.kind + ':' + item.key).join('|');
+
+		// an OBS event must not rebuild an open panel and drop keyboard focus
+		if (!force && sig === this.hidden_panel_sig && panel.firstChild)
+			return;
+
+		this.hidden_panel_sig = sig;
+		panel.textContent = '';
 
 		if (!items.length) {
 			panel.appendChild(h.NewElement('p', {
@@ -1211,7 +1423,7 @@ export default class WebRemote {
 		}
 
 		items.forEach((item) => {
-			const row = h.NewElement('div', {'className': 'wr-panel-row'});
+			const row  = h.NewElement('div', {'className': 'wr-panel-row'});
 			const name = h.NewElement('span', {'className': 'wr-panel-name'});
 			const show = h.NewElement('button', {
 				'type'     : 'button',
@@ -1224,7 +1436,19 @@ export default class WebRemote {
 			show.setAttribute('aria-label', 'Show ' + item.name);
 
 			show.addEventListener('click', () => {
-				this.set_hidden(item.kind, item.uuid, false);
+				// the panel is rebuilt by this call: keep focus on the same
+				// position, or on the header control when nothing is left
+				const buttons = [...panel.querySelectorAll('.wr-panel-button')];
+				const at      = buttons.indexOf(show);
+
+				this.set_hidden(item.kind, item.key, false);
+
+				const left = [...panel.querySelectorAll('.wr-panel-button')];
+				const next = left[Math.min(at, left.length - 1)] ||
+					(this.viewbar && this.viewbar.hidden_btn);
+
+				if (next)
+					next.focus();
 			}, false);
 
 			row.appendChild(name);
@@ -1299,7 +1523,7 @@ export default class WebRemote {
 			});
 
 			add_btn.addEventListener('click', () => {
-				this.visible_uuids().forEach((uuid) => this.view.add_dashboard_item(dash.id, uuid));
+				this.visible_keys().forEach((key) => this.view.add_dashboard_item(dash.id, key));
 				this.refresh_curation();
 			}, false);
 
@@ -1311,7 +1535,7 @@ export default class WebRemote {
 			});
 
 			remove_btn.addEventListener('click', () => {
-				this.visible_uuids().forEach((uuid) => this.view.remove_dashboard_item(dash.id, uuid));
+				this.visible_keys().forEach((key) => this.view.remove_dashboard_item(dash.id, key));
 				this.refresh_curation();
 			}, false);
 
@@ -1335,6 +1559,49 @@ export default class WebRemote {
 			row.appendChild(remove_btn);
 			row.appendChild(del_btn);
 			panel.appendChild(row);
+
+			// Text sources are inputs, so a dashboard that holds no text key
+			// blacks every pane out. List them per dashboard, with membership
+			// visible, so one can be added without switching back to All.
+			const group = h.NewElement('div', {'className': 'wr-panel-group'});
+
+			group.appendChild(h.NewElement('p', {
+				'className': 'wr-panel-group-title',
+				'innerHTML': 'Text sources'
+			}));
+
+			const sources = this.text_sources();
+
+			if (!sources.length) {
+				group.appendChild(h.NewElement('p', {
+					'className': 'wr-panel-empty',
+					'innerHTML': 'No text sources in OBS.'
+				}));
+			} else {
+				sources.forEach((source) => {
+					const label = h.NewElement('label', {'className': 'wr-panel-check'});
+					const box   = h.NewElement('input', {'type': 'checkbox', 'className': 'wr-checkbox'});
+					const text  = h.NewElement('span', {'className': 'wr-panel-name'});
+
+					text.textContent = source.name;
+					box.checked = dash.items.includes(source.key);
+
+					box.addEventListener('change', () => {
+						if (box.checked)
+							this.view.add_dashboard_item(dash.id, source.key);
+						else
+							this.view.remove_dashboard_item(dash.id, source.key);
+
+						this.refresh_curation();
+					}, false);
+
+					label.appendChild(box);
+					label.appendChild(text);
+					group.appendChild(label);
+				});
+			}
+
+			panel.appendChild(group);
 		});
 
 		if (!this.view.dashboards().length) {
