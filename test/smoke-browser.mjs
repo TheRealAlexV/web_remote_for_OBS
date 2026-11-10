@@ -1103,157 +1103,159 @@ async function runClickGuardChecks () {
 		};
 	})()`);
 
-	if (armed.error)
-		throw new Error(armed.error);
+	try {
+		if (armed.error)
+			throw new Error(armed.error);
 
-	if (armed.armed_pointer !== 7)
-		throw new Error(`a grip press did not arm the click guard (drag_click_pointer = ${JSON.stringify(armed.armed_pointer)})`);
+		if (armed.armed_pointer !== 7)
+			throw new Error(`a grip press did not arm the click guard (drag_click_pointer = ${JSON.stringify(armed.armed_pointer)})`);
 
-	if (!armed.dragging || armed.still_dragging)
-		throw new Error('a grip press did not start, or its release did not finish, the drag');
+		if (!armed.dragging || armed.still_dragging)
+			throw new Error('a grip press did not start, or its release did not finish, the drag');
 
-	if (armed.swallowed !== 0)
-		throw new Error('the click a grip press leaves behind did switch a scene');
+		if (armed.swallowed !== 0)
+			throw new Error('the click a grip press leaves behind did switch a scene');
 
-	console.log('PASS: a grip press leaves one click behind, and that click does not switch the scene');
+		console.log('PASS: a grip press leaves one click behind, and that click does not switch the scene');
 
-	const rect = await evaluate(`(() => {
-		const probe = window.__wr_click_probe;
-		const el    = probe.row.querySelector('label') || probe.row;
+		const rect = await evaluate(`(() => {
+			const probe = window.__wr_click_probe;
+			const el    = probe.row.querySelector('label') || probe.row;
 
-		el.scrollIntoView({ block: 'center' });
+			el.scrollIntoView({ block: 'center' });
 
-		const box = el.getBoundingClientRect();
-		return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
-	})()`);
+			const box = el.getBoundingClientRect();
+			return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+		})()`);
 
-	const started = Date.now();
+		const started = Date.now();
 
-	await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved',    x: rect.x, y: rect.y, button: 'none' });
-	await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed',  x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
-	await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
+		await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved',    x: rect.x, y: rect.y, button: 'none' });
+		await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed',  x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
+		await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
 
-	const elapsed     = Date.now() - started;
-	const after_click = await evaluate(`window.__wr_click_probe.clicked.length`);
+		const elapsed     = Date.now() - started;
+		const after_click = await evaluate(`window.__wr_click_probe.clicked.length`);
 
-	if (after_click !== 1)
-		throw new Error(`a click ${elapsed} ms after a finished drag did not reach the row (switches recorded: ${after_click})`);
+		if (after_click !== 1)
+			throw new Error(`a click ${elapsed} ms after a finished drag did not reach the row (switches recorded: ${after_click})`);
 
-	console.log(`PASS: a click ${elapsed} ms after a finished drag still reaches the row`);
+		console.log(`PASS: a click ${elapsed} ms after a finished drag still reaches the row`);
 
-	// the guard is spent: a later click must not be taken as well
-	const after_second = await evaluate(`(() => {
-		const probe = window.__wr_click_probe;
+		// the guard is spent: a later click must not be taken as well
+		const after_second = await evaluate(`(() => {
+			const probe = window.__wr_click_probe;
 
-		probe.row.dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, pointerId: 7 }));
-		return probe.clicked.length;
-	})()`);
+			probe.row.dispatchEvent(new PointerEvent('click', { bubbles: true, cancelable: true, pointerId: 7 }));
+			return probe.clicked.length;
+		})()`);
 
-	if (after_second !== 2)
-		throw new Error(`the guard swallowed more than the one click it was armed for (switches recorded: ${after_second})`);
+		if (after_second !== 2)
+			throw new Error(`the guard swallowed more than the one click it was armed for (switches recorded: ${after_second})`);
 
-	console.log('PASS: the guard is spent after one click; the next one reaches the row');
+		console.log('PASS: the guard is spent after one click; the next one reaches the row');
 
-	// the guard's other exits: a new press, a cancelled gesture, and an id that
-	// never saw its click at all
-	const lifecycle = await evaluate(`(() => {
-		const wr   = window.wr;
-		const probe = window.__wr_click_probe;
-		const row  = probe.row;
-		const grip = row.querySelector('.wr-grip');
+		// the guard's other exits: a new press, a cancelled gesture, and an id that
+		// never saw its click at all
+		const lifecycle = await evaluate(`(() => {
+			const wr   = window.wr;
+			const probe = window.__wr_click_probe;
+			const row  = probe.row;
+			const grip = row.querySelector('.wr-grip');
 
-		if (!wr || !grip)
-			return { error: 'the click probe lost its row or grip' };
+			if (!wr || !grip)
+				return { error: 'the click probe lost its row or grip' };
 
-		const capture = row.setPointerCapture;
-		row.setPointerCapture = () => {};
-		row.hasPointerCapture = () => false;
+			const capture = row.setPointerCapture;
+			row.setPointerCapture = () => {};
+			row.hasPointerCapture = () => false;
 
-		const pointer = (type, id) => new PointerEvent(type, {
-			bubbles: true, cancelable: true, pointerId: id,
-			pointerType: 'mouse', button: 0, buttons: 1,
-			clientX: 4, clientY: 4,
-		});
+			const pointer = (type, id) => new PointerEvent(type, {
+				bubbles: true, cancelable: true, pointerId: id,
+				pointerType: 'mouse', button: 0, buttons: 1,
+				clientX: 4, clientY: 4,
+			});
 
-		// a press and its release, which arms the guard for that pointer
-		const arm = (id) => {
-			grip.dispatchEvent(pointer('pointerdown', id));
-			row.dispatchEvent(pointer('pointerup', id));
-		};
-		const click = (id) => row.dispatchEvent(
-			new PointerEvent('click', { bubbles: true, cancelable: true, pointerId: id }));
+			// a press and its release, which arms the guard for that pointer
+			const arm = (id) => {
+				grip.dispatchEvent(pointer('pointerdown', id));
+				row.dispatchEvent(pointer('pointerup', id));
+			};
+			const click = (id) => row.dispatchEvent(
+				new PointerEvent('click', { bubbles: true, cancelable: true, pointerId: id }));
 
-		const seen = () => probe.clicked.length;
-		const start = seen();
-		const out = {};
+			const seen = () => probe.clicked.length;
+			const start = seen();
+			const out = {};
 
-		// 1. a new pointerdown means the armed click never arrived
-		arm(11);
-		out.armed_for_press = wr.drag_click_pointer;
-		document.dispatchEvent(pointer('pointerdown', 12));
-		out.after_new_press = wr.drag_click_pointer;
-		click(11);
-		out.reached_after_press = seen() - start;
+			// 1. a new pointerdown means the armed click never arrived
+			arm(11);
+			out.armed_for_press = wr.drag_click_pointer;
+			document.dispatchEvent(pointer('pointerdown', 12));
+			out.after_new_press = wr.drag_click_pointer;
+			click(11);
+			out.reached_after_press = seen() - start;
 
-		// 2. a cancelled gesture leaves no click to swallow
-		arm(21);
-		out.armed_for_cancel = wr.drag_click_pointer;
-		row.dispatchEvent(pointer('pointercancel', 21));
-		out.after_cancel = wr.drag_click_pointer;
+			// 2. a cancelled gesture leaves no click to swallow
+			arm(21);
+			out.armed_for_cancel = wr.drag_click_pointer;
+			row.dispatchEvent(pointer('pointercancel', 21));
+			out.after_cancel = wr.drag_click_pointer;
 
-		// 3. armed for one pointer, an unrelated click must pass
-		arm(31);
-		out.armed_for_stale = wr.drag_click_pointer;
-		const before_unrelated = seen();
-		click(32);
-		out.reached_unrelated = seen() - before_unrelated;
+			// 3. armed for one pointer, an unrelated click must pass
+			arm(31);
+			out.armed_for_stale = wr.drag_click_pointer;
+			const before_unrelated = seen();
+			click(32);
+			out.reached_unrelated = seen() - before_unrelated;
 
-		// leave nothing armed for whatever runs next
-		document.dispatchEvent(pointer('pointerdown', 0));
+			// leave nothing armed for whatever runs next
+			document.dispatchEvent(pointer('pointerdown', 0));
 
-		row.setPointerCapture = capture;
-		delete row.hasPointerCapture;
+			row.setPointerCapture = capture;
+			delete row.hasPointerCapture;
 
-		return out;
-	})()`);
+			return out;
+		})()`);
 
-	if (lifecycle.error)
-		throw new Error(lifecycle.error);
+		if (lifecycle.error)
+			throw new Error(lifecycle.error);
 
-	if (lifecycle.armed_for_press !== 11 || lifecycle.after_new_press !== null)
-		throw new Error(`a new pointerdown did not disarm the click guard ` +
-			`(armed ${JSON.stringify(lifecycle.armed_for_press)}, after ${JSON.stringify(lifecycle.after_new_press)})`);
+		if (lifecycle.armed_for_press !== 11 || lifecycle.after_new_press !== null)
+			throw new Error(`a new pointerdown did not disarm the click guard ` +
+				`(armed ${JSON.stringify(lifecycle.armed_for_press)}, after ${JSON.stringify(lifecycle.after_new_press)})`);
 
-	if (lifecycle.reached_after_press !== 1)
-		throw new Error(`the click after a disarming press did not reach the row ` +
-			`(switches recorded: ${lifecycle.reached_after_press})`);
+		if (lifecycle.reached_after_press !== 1)
+			throw new Error(`the click after a disarming press did not reach the row ` +
+				`(switches recorded: ${lifecycle.reached_after_press})`);
 
-	if (lifecycle.armed_for_cancel !== 21 || lifecycle.after_cancel !== null)
-		throw new Error(`a pointercancel did not disarm the click guard ` +
-			`(armed ${JSON.stringify(lifecycle.armed_for_cancel)}, after ${JSON.stringify(lifecycle.after_cancel)})`);
+		if (lifecycle.armed_for_cancel !== 21 || lifecycle.after_cancel !== null)
+			throw new Error(`a pointercancel did not disarm the click guard ` +
+				`(armed ${JSON.stringify(lifecycle.armed_for_cancel)}, after ${JSON.stringify(lifecycle.after_cancel)})`);
 
-	if (lifecycle.armed_for_stale !== 31 || lifecycle.reached_unrelated !== 1)
-		throw new Error(`an armed id swallowed an unrelated click ` +
-			`(armed ${JSON.stringify(lifecycle.armed_for_stale)}, reached ${lifecycle.reached_unrelated})`);
+		if (lifecycle.armed_for_stale !== 31 || lifecycle.reached_unrelated !== 1)
+			throw new Error(`an armed id swallowed an unrelated click ` +
+				`(armed ${JSON.stringify(lifecycle.armed_for_stale)}, reached ${lifecycle.reached_unrelated})`);
 
-	console.log('PASS: a new press and a cancel both disarm the guard; an armed id swallows only its own click');
+		console.log('PASS: a new press and a cancel both disarm the guard; an armed id swallows only its own click');
+	} finally {
+		// leave the page as it was found: the stub must not outlive this check
+		await evaluate(`(() => {
+			const probe = window.__wr_click_probe;
 
-	// leave the page as it was found: the stub must not outlive this check
-	await evaluate(`(() => {
-		const probe = window.__wr_click_probe;
+			if (!probe)
+				return;
 
-		if (!probe)
-			return;
+			const scene = Object.values(window.wr.scenes).find((item) => item.el === probe.row);
 
-		const scene = Object.values(window.wr.scenes).find((item) => item.el === probe.row);
+			if (scene && probe.original)
+				scene.set_scene = probe.original;
+			else if (scene)
+				delete scene.set_scene;
 
-		if (scene && probe.original)
-			scene.set_scene = probe.original;
-		else if (scene)
-			delete scene.set_scene;
-
-		delete window.__wr_click_probe;
-	})()`);
+			delete window.__wr_click_probe;
+		})()`);
+	}
 }
 
 try {

@@ -19,6 +19,7 @@ globalThis.window = {
 };
 
 const { default: ViewState } = await import('../js/ViewState.js');
+const { scene_key, input_key } = await import('../js/keys.js');
 
 const KEY = 'wr_view';
 
@@ -59,6 +60,28 @@ function eq (actual, expected, what) {
 		throw new Error(`${what}: expected ${b}, got ${a}`);
 }
 
+// --- keys --------------------------------------------------------------------
+//
+// Driven through the real functions, never a literal the test wrote itself: a
+// scene "Mic" and an input "Mic" must not share a key, or one rename rewrites
+// the other's membership in every list and dashboard.
+
+check('a scene Mic and an input Mic are different keys', () => {
+	const scene = scene_key({ sceneName: 'Mic' });
+	const input = input_key({ inputName: 'Mic' });
+
+	eq(scene, 'scene-name:Mic', 'scene key');
+	eq(input, 'input-name:Mic', 'input key');
+
+	if (scene === input)
+		throw new Error(`a scene and an input share the key ${JSON.stringify(scene)}`);
+});
+
+check('a uuid-bearing object keys by its uuid, for both kinds', () => {
+	eq(scene_key({ sceneUuid: 'scene-1', sceneName: 'Mic' }), 'scene-1', 'scene key');
+	eq(input_key({ inputUuid: 'input-1', inputName: 'Mic' }), 'input-1', 'input key');
+});
+
 // --- rename_key -------------------------------------------------------------
 
 check('a key in no list is a no-op that writes nothing', () => {
@@ -86,18 +109,42 @@ check('a rename moves hidden, order and the dashboards together', () => {
 });
 
 check('a scene Mic and an input Mic on one dashboard: renaming the scene leaves the input', () => {
+	// built by the real functions: the fixtures are whatever the app would key
+	const scene   = scene_key({ sceneName: 'Mic' });
+	const input   = input_key({ inputName: 'Mic' });
+	const renamed = scene_key({ sceneName: 'Studio Mic' });
+
 	const view = seed(base_blob({
-		scenes: { hidden: ['scene-name:Mic'], order: ['scene-name:Mic'] },
-		audio: { hidden: ['input-name:Mic'], order: ['input-name:Mic'] },
-		dashboards: [{ id: 'd1', name: 'One', items: ['scene-name:Mic', 'input-name:Mic'] }],
+		scenes: { hidden: [scene], order: [scene] },
+		audio: { hidden: [input], order: [input] },
+		dashboards: [{ id: 'd1', name: 'One', items: [scene, input] }],
 	}));
 
-	view.rename_key('scenes', 'scene-name:Mic', 'scene-name:Studio Mic');
+	view.rename_key('scenes', scene, renamed);
 
-	eq(view.data.dashboards[0].items, ['scene-name:Studio Mic', 'input-name:Mic'], 'dashboard items');
-	eq(view.data.audio.hidden, ['input-name:Mic'], 'audio hidden');
-	eq(view.data.audio.order, ['input-name:Mic'], 'audio order');
-	eq(view.data.scenes.hidden, ['scene-name:Studio Mic'], 'scenes hidden');
+	eq(view.data.dashboards[0].items, [renamed, input], 'dashboard items');
+	eq(view.data.audio.hidden, [input], 'audio hidden');
+	eq(view.data.audio.order, [input], 'audio order');
+	eq(view.data.scenes.hidden, [renamed], 'scenes hidden');
+});
+
+check('an audio rename moves the audio key in hidden, order and the dashboards; the scenes stay', () => {
+	const key     = input_key({ inputName: 'Mic' });
+	const renamed = input_key({ inputName: 'Studio Mic' });
+	const scene   = scene_key({ sceneName: 'Mic' });
+
+	const view = seed(base_blob({
+		scenes: { hidden: [scene], order: [scene] },
+		audio: { hidden: [key], order: ['a', key, 'b'] },
+		dashboards: [{ id: 'd1', name: 'One', items: [key, scene] }],
+	}));
+
+	view.rename_key('audio', key, renamed);
+
+	eq(view.data.audio.hidden, [renamed], 'audio hidden');
+	eq(view.data.audio.order, ['a', renamed, 'b'], 'audio order');
+	eq(view.data.dashboards[0].items, [renamed, scene], 'dashboard items');
+	eq(view.data.scenes, { hidden: [scene], order: [scene] }, 'scenes untouched');
 });
 
 check('old and new both stored: neither list nor dashboard grows a duplicate', () => {
@@ -114,9 +161,14 @@ check('old and new both stored: neither list nor dashboard grows a duplicate', (
 	eq(view.effective_order('scenes', ['new', 'a']), ['new', 'a'], 'effective order');
 });
 
-check('a duplicated order key renders one row, not two', () => {
-	const view = seed(base_blob({ scenes: { hidden: [], order: ['a', 'a', 'b'] } }));
+check('a key stored twice in the live list still renders one row', () => {
+	// pushed after load: normalize() would have deduped it, so only
+	// effective_order's !seen.has(uuid) guard can keep the row count at one
+	const view = seed(base_blob({ scenes: { hidden: [], order: ['a', 'b'] } }));
 
+	view.data.scenes.order.push('a');
+
+	eq(view.data.scenes.order, ['a', 'b', 'a'], 'stored order');
 	eq(view.effective_order('scenes', ['a', 'b']), ['a', 'b'], 'effective order');
 });
 

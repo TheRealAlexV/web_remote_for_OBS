@@ -3,6 +3,7 @@ import SourceScene from './SourceScene.js';
 import SourceAudio from './SourceAudio.js';
 import SourceText, {source_name as source_name_of} from './SourceText.js';
 import ViewState, {STORAGE_KEY} from './ViewState.js';
+import {scene_key as scene_key_of, input_key as input_key_of} from './keys.js';
 
 // the one definition of "this input is a text source"
 function is_text_kind (kind) {
@@ -344,23 +345,15 @@ export default class WebRemote {
 	}
 
 	/**
-	 * A stable key for any item. OBS 28's obs-websocket predates sceneUuid and
-	 * inputUuid, so the name is the fallback: a rename then breaks the link, but
-	 * an item is never silently dropped from every list. Null means unkeyable,
-	 * which callers treat as "visible, and leave the order alone".
+	 * A stable key for any item, defined once in keys.js so the Node store tests
+	 * can import it. Call sites keep their current names.
 	 */
 	scene_key (scene) {
-		if (!scene)
-			return null;
-
-		return scene.sceneUuid || (scene.sceneName ? 'scene-name:' + scene.sceneName : null);
+		return scene_key_of(scene);
 	}
 
 	input_key (input) {
-		if (!input)
-			return null;
-
-		return input.inputUuid || (input.inputName ? 'input-name:' + input.inputName : null);
+		return input_key_of(input);
 	}
 
 	apply_scene_list (result) {
