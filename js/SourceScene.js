@@ -84,8 +84,10 @@ export default class SourceScene {
 			'tabindex' : '0',
 			'events'   : {
 				'click'      : function (e) {  // left click
-					// a click that ends a reorder drag must not also switch the scene
-					if (e.target.closest('.wr-row-tools') || wr.is_row_click_suppressed())
+					// a click that ends a reorder drag must not also switch the scene;
+					// asked of the guard by pointer, so an id left armed by a press
+					// that never clicked cannot swallow this one
+					if (e.target.closest('.wr-row-tools') || wr.consume_row_click_suppress(e))
 						return;
 
 					this.set_scene( e.shiftKey );

@@ -164,7 +164,69 @@ export default class ViewState {
 			}
 		}
 
+		// a newer format may key items differently; migrating it from v1 rules
+		// would rewrite what this tab cannot read
+		if (!this.future)
+			this.migrate_legacy_keys();
+
 		return this.data;
+	}
+
+	/**
+	 * Keys written before the fallback named its kind ('name:Mic') cannot say
+	 * which object they meant, and a scene and an input can share a name. A
+	 * per-kind list only ever held its own kind, so those move in place; a
+	 * dashboard holds both, so one ambiguous entry becomes both keys — an entry
+	 * for an object that does not exist matches nothing and renders nothing.
+	 * Runs once: no 'name:' key survives it.
+	 */
+	migrate_legacy_keys () {
+		const legacy = (key) => typeof key === 'string' && key.startsWith('name:');
+		let moved    = 0;
+
+		KINDS.forEach((kind) => {
+			const prefix = kind === 'scenes' ? 'scene-name:' : 'input-name:';
+			const entry  = this.data[kind];
+
+			['hidden', 'order'].forEach((field) => {
+				const out = [];
+
+				entry[field].forEach((key) => {
+					if (!legacy(key)) {
+						out.push(key);
+						return;
+					}
+
+					moved += 1;
+					out.push(prefix + key.slice(5));
+				});
+
+				entry[field] = clean_list(out);
+			});
+		});
+
+		this.data.dashboards.forEach((dash) => {
+			const out = [];
+
+			dash.items.forEach((key) => {
+				if (!legacy(key)) {
+					out.push(key);
+					return;
+				}
+
+				moved += 1;
+				out.push('scene-name:' + key.slice(5), 'input-name:' + key.slice(5));
+			});
+
+			dash.items = clean_list(out);
+		});
+
+		if (!moved)
+			return 0;
+
+		console.warn('ViewState: moved ' + moved + ' saved entries written before keys named their kind');
+		this.save();
+		return moved;
 	}
 
 	/**
@@ -248,17 +310,21 @@ export default class ViewState {
 
 		const liveSet = new Set(live);
 		const out     = [];
+		const seen    = new Set();
 
 		entry.order.forEach((uuid) => {
-			if (liveSet.has(uuid))
+			// a key stored twice would otherwise render two rows for one item
+			if (liveSet.has(uuid) && !seen.has(uuid)) {
+				seen.add(uuid);
 				out.push(uuid);
+			}
 		});
 
-		const seen = new Set(out);
-
 		live.forEach((uuid) => {
-			if (!seen.has(uuid))
+			if (!seen.has(uuid)) {
+				seen.add(uuid);
 				out.push(uuid);
+			}
 		});
 
 		return out;
@@ -349,7 +415,9 @@ export default class ViewState {
 			if (!entry[field].includes(old_key))
 				return;
 
-			entry[field] = entry[field].map(swap);
+			// cleaned, not just swapped: a list holding both keys would otherwise
+			// grow a duplicate the moment old and new name the same item
+			entry[field] = clean_list(entry[field].map(swap));
 			changed = true;
 		});
 
@@ -357,7 +425,7 @@ export default class ViewState {
 			if (!dash.items.includes(old_key))
 				return;
 
-			dash.items = dash.items.map(swap);
+			dash.items = clean_list(dash.items.map(swap));
 			changed = true;
 		});
 

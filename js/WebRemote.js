@@ -253,8 +253,14 @@ export default class WebRemote {
 		}
 
 		if (results) {
-			this.update_status_list(results);
-			this.update_outputs(results[6]);
+			// a throw in either must not cost the tick its re-arm below, or
+			// polling stops for good with the page still looking alive
+			try {
+				this.update_status_list(results);
+				this.update_outputs(results[6]);
+			} catch (e) {
+				this.log_async_error(e);
+			}
 		}
 
 		// a view change that could not re-read the inputs leaves the audio DOM
@@ -347,14 +353,14 @@ export default class WebRemote {
 		if (!scene)
 			return null;
 
-		return scene.sceneUuid || (scene.sceneName ? 'name:' + scene.sceneName : null);
+		return scene.sceneUuid || (scene.sceneName ? 'scene-name:' + scene.sceneName : null);
 	}
 
 	input_key (input) {
 		if (!input)
 			return null;
 
-		return input.inputUuid || (input.inputName ? 'name:' + input.inputName : null);
+		return input.inputUuid || (input.inputName ? 'input-name:' + input.inputName : null);
 	}
 
 	apply_scene_list (result) {
@@ -449,6 +455,12 @@ export default class WebRemote {
 		for (let sname in this.scenes) {
 			if (this.scenes[sname].last_update != this.tick) {
 				this.scenes[sname].pause_update();
+
+				// a rebuild can drop the row a drag is using: its listeners and
+				// the armed click would otherwise outlive the element
+				if (this.drag && this.drag.el === this.scenes[sname].el)
+					this.release_row_drag(this.drag);
+
 				document.getElementById('scene_list').removeChild( this.scenes[sname].el );
 				delete this.scenes[sname];
 			}
@@ -507,8 +519,8 @@ export default class WebRemote {
 
 			// uuid-keyed scenes keep their key through a rename; a name-keyed
 			// one (OBS 28) follows the name so the hidden list stops lying
-			const old_key = 'name:' + old_name;
-			const new_key = 'name:' + new_name;
+			const old_key = 'scene-name:' + old_name;
+			const new_key = 'scene-name:' + new_name;
 
 			if (this.scene_names.has(old_key)) {
 				this.scene_names.delete(old_key);
@@ -579,7 +591,7 @@ export default class WebRemote {
 		// inputs without uuids are keyed by name, so the stored keys follow the
 		// rename here as well, or a hidden input comes back under its new name
 		if (old_name && new_name && old_name !== new_name)
-			this.view.rename_key('audio', 'name:' + old_name, 'name:' + new_name);
+			this.view.rename_key('audio', 'input-name:' + old_name, 'input-name:' + new_name);
 	}
 
 	async transition () {
@@ -727,6 +739,12 @@ export default class WebRemote {
 			if (!current_audio_names.includes(a.name)) {
 				// remove and destroy element
 				a.on_source_destroyed();
+
+				// a rebuild can drop the row a drag is using: its listeners and
+				// the armed click would otherwise outlive the element
+				if (this.drag && this.drag.el === a.get_element())
+					this.release_row_drag(this.drag);
+
 				document.getElementById('audio_list').removeChild( a.get_element() );
 
 				// remove from audio list
@@ -1025,10 +1043,6 @@ export default class WebRemote {
 			if (key)
 				this.view.set_hidden('scenes', key, true);
 		});
-	}
-
-	is_row_click_suppressed () {
-		return this.drag_click_pointer !== null;
 	}
 
 	// the document guard consumes the one click a grip press leaves behind; this

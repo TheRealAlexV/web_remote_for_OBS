@@ -3,7 +3,7 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"check": "for f in js/*.js; do node --check \"$f\" || exit 1; done",
+		"check": "for f in js/*.js; do node --check \"$f\" || exit 1; done && node test/viewstate.mjs",
 		"smoke": "node test/smoke-browser.mjs"
 	},
 	"devDependencies": {

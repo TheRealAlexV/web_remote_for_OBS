@@ -1154,6 +1154,90 @@ async function runClickGuardChecks () {
 
 	console.log('PASS: the guard is spent after one click; the next one reaches the row');
 
+	// the guard's other exits: a new press, a cancelled gesture, and an id that
+	// never saw its click at all
+	const lifecycle = await evaluate(`(() => {
+		const wr   = window.wr;
+		const probe = window.__wr_click_probe;
+		const row  = probe.row;
+		const grip = row.querySelector('.wr-grip');
+
+		if (!wr || !grip)
+			return { error: 'the click probe lost its row or grip' };
+
+		const capture = row.setPointerCapture;
+		row.setPointerCapture = () => {};
+		row.hasPointerCapture = () => false;
+
+		const pointer = (type, id) => new PointerEvent(type, {
+			bubbles: true, cancelable: true, pointerId: id,
+			pointerType: 'mouse', button: 0, buttons: 1,
+			clientX: 4, clientY: 4,
+		});
+
+		// a press and its release, which arms the guard for that pointer
+		const arm = (id) => {
+			grip.dispatchEvent(pointer('pointerdown', id));
+			row.dispatchEvent(pointer('pointerup', id));
+		};
+		const click = (id) => row.dispatchEvent(
+			new PointerEvent('click', { bubbles: true, cancelable: true, pointerId: id }));
+
+		const seen = () => probe.clicked.length;
+		const start = seen();
+		const out = {};
+
+		// 1. a new pointerdown means the armed click never arrived
+		arm(11);
+		out.armed_for_press = wr.drag_click_pointer;
+		document.dispatchEvent(pointer('pointerdown', 12));
+		out.after_new_press = wr.drag_click_pointer;
+		click(11);
+		out.reached_after_press = seen() - start;
+
+		// 2. a cancelled gesture leaves no click to swallow
+		arm(21);
+		out.armed_for_cancel = wr.drag_click_pointer;
+		row.dispatchEvent(pointer('pointercancel', 21));
+		out.after_cancel = wr.drag_click_pointer;
+
+		// 3. armed for one pointer, an unrelated click must pass
+		arm(31);
+		out.armed_for_stale = wr.drag_click_pointer;
+		const before_unrelated = seen();
+		click(32);
+		out.reached_unrelated = seen() - before_unrelated;
+
+		// leave nothing armed for whatever runs next
+		document.dispatchEvent(pointer('pointerdown', 0));
+
+		row.setPointerCapture = capture;
+		delete row.hasPointerCapture;
+
+		return out;
+	})()`);
+
+	if (lifecycle.error)
+		throw new Error(lifecycle.error);
+
+	if (lifecycle.armed_for_press !== 11 || lifecycle.after_new_press !== null)
+		throw new Error(`a new pointerdown did not disarm the click guard ` +
+			`(armed ${JSON.stringify(lifecycle.armed_for_press)}, after ${JSON.stringify(lifecycle.after_new_press)})`);
+
+	if (lifecycle.reached_after_press !== 1)
+		throw new Error(`the click after a disarming press did not reach the row ` +
+			`(switches recorded: ${lifecycle.reached_after_press})`);
+
+	if (lifecycle.armed_for_cancel !== 21 || lifecycle.after_cancel !== null)
+		throw new Error(`a pointercancel did not disarm the click guard ` +
+			`(armed ${JSON.stringify(lifecycle.armed_for_cancel)}, after ${JSON.stringify(lifecycle.after_cancel)})`);
+
+	if (lifecycle.armed_for_stale !== 31 || lifecycle.reached_unrelated !== 1)
+		throw new Error(`an armed id swallowed an unrelated click ` +
+			`(armed ${JSON.stringify(lifecycle.armed_for_stale)}, reached ${lifecycle.reached_unrelated})`);
+
+	console.log('PASS: a new press and a cancel both disarm the guard; an armed id swallows only its own click');
+
 	// leave the page as it was found: the stub must not outlive this check
 	await evaluate(`(() => {
 		const probe = window.__wr_click_probe;
